@@ -166,11 +166,16 @@ function injectClearCacheButton(): void {
   document.body.appendChild(btn);
 }
 
+function isWishlistPage(): boolean {
+  const path = window.location.pathname.toLowerCase();
+  return path === "/wishlist" || path.startsWith("/wishlist/");
+}
+
 function scanAll(): void {
+  if (!isWishlistPage()) return;
   const container = findWishlistContainer(document) || document.body;
   const rows = findRowElements(container);
   for (const row of rows) {
-    // If the row hasn't been processed yet or the icon was removed by React
     const needsProcessing = !row.hasAttribute(PROCESSED_ATTR);
     const hasIcon = !!row.querySelector(`.${ICON_CLASS}`) || !!row.parentElement?.querySelector(`.${ICON_CLASS}`);
     if (needsProcessing || !hasIcon) {
@@ -182,6 +187,8 @@ function scanAll(): void {
 }
 
 function bootstrap(): void {
+  if (!isWishlistPage()) return;
+
   injectStylesOnce();
   injectClearCacheButton();
 
@@ -193,6 +200,7 @@ function bootstrap(): void {
   // Debounced mutation observer to instantly handle React DOM updates & hydration
   let scanScheduled = false;
   const debouncedScan = () => {
+    if (!isWishlistPage()) return;
     if (!scanScheduled) {
       scanScheduled = true;
       requestAnimationFrame(() => {

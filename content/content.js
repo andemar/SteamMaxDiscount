@@ -446,7 +446,12 @@
     });
     document.body.appendChild(btn);
   }
+  function isWishlistPage() {
+    const path = window.location.pathname.toLowerCase();
+    return path === "/wishlist" || path.startsWith("/wishlist/");
+  }
   function scanAll() {
+    if (!isWishlistPage()) return;
     const container = findWishlistContainer(document) || document.body;
     const rows = findRowElements(container);
     for (const row of rows) {
@@ -460,6 +465,7 @@
     }
   }
   function bootstrap() {
+    if (!isWishlistPage()) return;
     injectStylesOnce();
     injectClearCacheButton();
     scanAll();
@@ -467,6 +473,7 @@
     setTimeout(scanAll, 1500);
     let scanScheduled = false;
     const debouncedScan = () => {
+      if (!isWishlistPage()) return;
       if (!scanScheduled) {
         scanScheduled = true;
         requestAnimationFrame(() => {

@@ -63,36 +63,38 @@ async function fetchCheapSharkSummary(
       Accept: "application/json",
     });
     const data = JSON.parse(gameText);
-    if (
-      !data ||
-      !data.cheapestPriceEver ||
-      !data.deals ||
-      data.deals.length === 0
-    ) {
+    if (!data || !data.deals || data.deals.length === 0) {
       return null;
     }
 
     const steamDeal =
-      data.deals.find((d: any) => d.storeID === "1") || data.deals[0];
-    const retailPrice = parseFloat(steamDeal.retailPrice);
-    const cheapestPrice = parseFloat(data.cheapestPriceEver.price);
+      data.deals.find((d: any) => d.storeID === "1");
+    const retailPrice = parseFloat(steamDeal ? steamDeal.retailPrice : data.deals[0].retailPrice);
+    const cheapestPrice = parseFloat(data.cheapestPriceEver?.price ?? "0");
 
-    if (
-      Number.isFinite(retailPrice) &&
-      retailPrice > 0 &&
-      Number.isFinite(cheapestPrice)
-    ) {
-      const maxDiscount = Math.round(
-        ((retailPrice - cheapestPrice) / retailPrice) * 100
-      );
+    if (Number.isFinite(retailPrice) && retailPrice > 0) {
+      let maxDiscount = 0;
+      if (Number.isFinite(cheapestPrice) && cheapestPrice > 0) {
+        maxDiscount = Math.round(
+          ((retailPrice - cheapestPrice) / retailPrice) * 100
+        );
+      }
+
+      if (steamDeal && steamDeal.savings) {
+        const steamSavings = Math.round(parseFloat(steamDeal.savings));
+        if (steamSavings > 0) {
+          maxDiscount = Math.max(maxDiscount, steamSavings);
+        }
+      }
+
       if (maxDiscount > 0) {
         console.log(
-          `[swd-bg] CheapShark historical max discount for appid=${appid} (${data.info?.title}): allTimeMaxPercent=${maxDiscount}% (lowest: $${cheapestPrice}, retail: $${retailPrice})`
+          `[swd-bg] CheapShark parsed Steam max discount for appid=${appid} (${data.info?.title}): allTimeMaxPercent=${maxDiscount}%`
         );
         return {
           appid,
           allTimeMaxPercent: maxDiscount,
-          timesAtMax: 1,
+          timesAtMax: 2,
           lastUpdatedAt: Date.now(),
         };
       }
@@ -105,37 +107,42 @@ async function fetchCheapSharkSummary(
 
 async function fetchDiscountSummary(appid: number): Promise<DiscountSummary | null> {
   return rateLimitedFetch(async () => {
-    console.log(`[swd-bg] Fetching historical discount data for appid=${appid}...`);
+    console.log(`[swd-bg] Querying price history for appid=${appid}...`);
 
-    // 1. Primary: CheapShark API (all-time historical low lookup)
-    const csSummary = await fetchCheapSharkSummary(appid);
-    if (csSummary) {
-      return csSummary;
-    }
-
-    // 2. Secondary: SteamDB HTML scraping
+    // 1. Primary: Try SteamDB first
     try {
+      console.log(`[swd-bg] [1/2] Attempting SteamDB for appid=${appid}...`);
       const html = await fetchText(STEAMDB_APP_URL(appid), {
         Accept: "text/html,application/xhtml+xml",
       });
 
       if (
-        !html.includes("Please do not scrape") &&
-        !html.includes("Cloudflare") &&
-        !html.includes("Checking your browser")
+        html.includes("Please do not scrape") ||
+        html.includes("Cloudflare") ||
+        html.includes("Checking your browser")
       ) {
+        console.warn(`[swd-bg] SteamDB blocked request with anti-scrape notice for appid=${appid}. Switching to fallback...`);
+      } else {
         const summary = parseSteamdbHtml(html, appid);
         if (summary) {
-          console.log(`[swd-bg] SteamDB HTML scraping success for appid=${appid}:`, summary);
+          console.log(`[swd-bg] SteamDB success for appid=${appid}:`, summary);
           return summary;
         }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[swd-bg] SteamDB fetch error for appid=${appid}:`, msg);
+      console.warn(`[swd-bg] SteamDB request failed for appid=${appid} (${msg}). Switching to fallback...`);
     }
 
-    console.warn(`[swd-bg] No historical price records found for appid=${appid}`);
+    // 2. Secondary Fallback: CheapShark API (open price history tracking database)
+    console.log(`[swd-bg] [2/2] Attempting CheapShark historical data fallback for appid=${appid}...`);
+    const csSummary = await fetchCheapSharkSummary(appid);
+    if (csSummary) {
+      console.log(`[swd-bg] Fallback successful for appid=${appid}:`, csSummary);
+      return csSummary;
+    }
+
+    console.warn(`[swd-bg] No historical price records found across all providers for appid=${appid}`);
     return null;
   });
 }

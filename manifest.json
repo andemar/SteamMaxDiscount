@@ -16,7 +16,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://store.steampowered.com/wishlist*"],
+      "matches": [
+        "https://store.steampowered.com/wishlist",
+        "https://store.steampowered.com/wishlist/*"
+      ],
       "js": ["content/content.js"],
       "run_at": "document_idle"
     }
