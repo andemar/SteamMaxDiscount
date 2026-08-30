@@ -166,79 +166,47 @@ function injectClearCacheButton(): void {
   document.body.appendChild(btn);
 }
 
-function scanInitial(container: HTMLElement): void {
+function scanAll(): void {
+  const container = findWishlistContainer(document) || document.body;
   const rows = findRowElements(container);
-  console.log("[swd] container found, rows:", rows.length, container);
-  let processed = 0;
-  let skipped = 0;
   for (const row of rows) {
-    const info = extractRowInfo(row);
-    if (info) {
-      processed++;
-      console.log("[swd] row appid=", info.appid, "discount=", info.currentDiscountPercent, info.rowEl);
-      void processRow(info);
-    } else {
-      skipped++;
+    // If the row hasn't been processed yet or the icon was removed by React
+    const needsProcessing = !row.hasAttribute(PROCESSED_ATTR);
+    const hasIcon = !!row.querySelector(`.${ICON_CLASS}`) || !!row.parentElement?.querySelector(`.${ICON_CLASS}`);
+    if (needsProcessing || !hasIcon) {
+      row.removeAttribute(PROCESSED_ATTR);
+      const info = extractRowInfo(row);
+      if (info) void processRow(info);
     }
   }
-  console.log(`[swd] processed=${processed} skipped=${skipped}`);
 }
 
 function bootstrap(): void {
   injectStylesOnce();
   injectClearCacheButton();
 
-  const tryInit = (): boolean => {
-    const container = findWishlistContainer(document);
-    if (!container || container.hasAttribute("data-swd-bound")) return false;
-    container.setAttribute("data-swd-bound", "1");
+  // Initial scans (immediate and delayed to catch post-hydration state)
+  scanAll();
+  setTimeout(scanAll, 500);
+  setTimeout(scanAll, 1500);
 
-    scanInitial(container);
-
-    attachWishlistObserver(container, (added) => {
-      for (const node of added) {
-        const nodeMatches =
-          typeof node.matches === "function" &&
-          (node as HTMLElement).matches("[href*='/app/']");
-        const hasChild = !!node.querySelector?.("[href*='/app/']");
-
-        if (nodeMatches || hasChild) {
-          /* Try to find the row element from the added node */
-          const parent =
-            (nodeMatches
-              ? node
-              : (node as HTMLElement).querySelector(
-                  "[data-app-id], [data-ds-appid], div.wishlist_row, div.Row, .search_result_row, [class*='wishlistRow']"
-                )) as HTMLElement | null;
-          if (parent) {
-            const info = extractRowInfo(parent);
-            if (info) void processRow(info);
-          } else {
-            /* Fallback: the added node itself may be the row */
-            const info = extractRowInfo(node as HTMLElement);
-            if (info) void processRow(info);
-          }
-        } else if (
-          node instanceof HTMLElement &&
-          (node.hasAttribute("data-ds-appid") ||
-            node.hasAttribute("data-app-id") ||
-            node.classList?.contains("search_result_row"))
-        ) {
-          /* The added node IS a row */
-          const info = extractRowInfo(node);
-          if (info) void processRow(info);
-        }
-      }
-    });
-    return true;
+  // Debounced mutation observer to instantly handle React DOM updates & hydration
+  let scanScheduled = false;
+  const debouncedScan = () => {
+    if (!scanScheduled) {
+      scanScheduled = true;
+      requestAnimationFrame(() => {
+        scanScheduled = false;
+        scanAll();
+      });
+    }
   };
 
-  if (tryInit()) return;
-
-  const rootObserver = new MutationObserver(() => {
-    if (tryInit()) rootObserver.disconnect();
-  });
+  const rootObserver = new MutationObserver(debouncedScan);
   rootObserver.observe(document.body, { childList: true, subtree: true });
+
+  // Rescan on scroll to handle Steam's virtualized infinite wishlist list
+  window.addEventListener("scroll", debouncedScan, { passive: true });
 }
 
 if (document.readyState === "complete" || document.readyState === "interactive") {

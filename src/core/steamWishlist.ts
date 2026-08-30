@@ -65,7 +65,7 @@ const SELECTORS = {
 
 /**
  * Locate the wishlist container. Tries known selectors first, then falls
- * back to dynamically finding the common ancestor of app links on the page.
+ * back to dynamically finding the common ancestor holding distinct games.
  */
 export function findWishlistContainer(doc: Document): HTMLElement | null {
   for (const sel of SELECTORS.containerCandidates) {
@@ -80,70 +80,74 @@ export function findWishlistContainer(doc: Document): HTMLElement | null {
     }
   }
 
-  /* Dynamic fallback: find the first app link and walk up to a reasonable
-     ancestor that contains multiple app links (i.e. the wishlist container). */
-  const appLinks = doc.querySelectorAll<HTMLAnchorElement>(
-    SELECTORS.appLinkSelector
+  const appLinks = Array.from(
+    doc.querySelectorAll<HTMLAnchorElement>(SELECTORS.appLinkSelector)
   );
   if (appLinks.length > 0) {
+    const totalUniqueAppids = new Set<number>();
+    appLinks.forEach((a) => {
+      const id = parseAppid(a.href);
+      if (id) totalUniqueAppids.add(id);
+    });
+
     let candidate: HTMLElement | null = appLinks[0].parentElement;
+    let bestContainer: HTMLElement | null = null;
     let depth = 0;
-    while (candidate && candidate !== doc.body && depth < 12) {
-      const linksInside = candidate.querySelectorAll(
-        SELECTORS.appLinkSelector
-      ).length;
-      if (linksInside >= 2) {
-        console.log(
-          "[swd] container found via dynamic fallback at depth",
-          depth,
-          candidate.tagName,
-          candidate.className
-        );
-        return candidate;
+
+    while (candidate && candidate !== doc.body && depth < 15) {
+      const distinctInCandidate = new Set<number>();
+      candidate
+        .querySelectorAll<HTMLAnchorElement>(SELECTORS.appLinkSelector)
+        .forEach((a) => {
+          const id = parseAppid(a.href);
+          if (id) distinctInCandidate.add(id);
+        });
+
+      if (
+        distinctInCandidate.size >= Math.min(2, totalUniqueAppids.size) &&
+        distinctInCandidate.size > 0
+      ) {
+        bestContainer = candidate;
       }
       candidate = candidate.parentElement;
       depth++;
     }
-    /* Last resort: if there's only one app link, use its grandparent */
-    if (appLinks.length === 1 && appLinks[0].parentElement?.parentElement) {
-      const fallback = appLinks[0].parentElement.parentElement;
-      console.log("[swd] container: single-link fallback", fallback.tagName);
-      return fallback;
+
+    if (bestContainer) {
+      console.log(
+        "[swd] container found holding",
+        totalUniqueAppids.size,
+        "games:",
+        bestContainer.tagName,
+        bestContainer.className
+      );
+      return bestContainer;
     }
   }
 
-  console.warn("[swd] could not find wishlist container");
-  return null;
+  return doc.body;
 }
 
 /**
  * Find the root element for each wishlist row.
- * Walks up from each `/app/` anchor to its top-level card (direct child or main card inside container),
- * ensuring each game in the wishlist is treated as a single unified row.
+ * Groups by distinct appid to ensure every game on the page gets its own card.
  */
 export function findRowElements(container: HTMLElement): HTMLElement[] {
-  const rows: HTMLElement[] = [];
   const appLinks = Array.from(
     container.querySelectorAll<HTMLAnchorElement>(SELECTORS.appLinkSelector)
   );
 
-  for (const a of appLinks) {
-    const card = findOuterCard(a, container);
-    if (card && card !== container && !rows.includes(card)) {
-      rows.push(card);
-    }
-  }
+  const seenAppids = new Set<number>();
+  const rows: HTMLElement[] = [];
 
-  // Fallback to rowCandidates if no appLinks cards were found
-  if (rows.length === 0) {
-    for (const sel of SELECTORS.rowCandidates) {
-      try {
-        container.querySelectorAll<HTMLElement>(sel).forEach((el) => {
-          if (el !== container && !rows.includes(el)) rows.push(el);
-        });
-      } catch {
-        /* invalid selector – skip */
-      }
+  for (const a of appLinks) {
+    const appid = parseAppid(a.href);
+    if (!appid || seenAppids.has(appid)) continue;
+
+    const card = findOuterCard(a, container);
+    if (card && card !== container) {
+      seenAppids.add(appid);
+      rows.push(card);
     }
   }
 
@@ -152,8 +156,6 @@ export function findRowElements(container: HTMLElement): HTMLElement[] {
 
 /**
  * Walk up from an app link to find its outer game card in the container.
- * Prefers the highest ancestor before the container so that title and discount
- * are in the same element.
  */
 function findOuterCard(
   link: HTMLElement,
@@ -164,11 +166,9 @@ function findOuterCard(
   let depth = 0;
 
   while (cur && cur !== container && depth < 10) {
-    // If cur is a direct child of container, it's the game row/card
     if (cur.parentElement === container) {
       return cur;
     }
-    // Or if cur contains a discount percentage and a title
     if (
       cur.querySelector(SELECTORS.discountCandidates.join(",")) &&
       cur.querySelector(SELECTORS.appLinkSelector)

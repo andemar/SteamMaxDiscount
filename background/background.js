@@ -1,9 +1,52 @@
-const STEAMDB_APP_URL = (appid) => `https://steamdb.info/app/${appid}/`;
-const CHEAPSHARK_API = (appid) => `https://www.cheapshark.com/api/1.0/games?steamAppID=${appid}`;
+const CHEAPSHARK_APPID_API = (appid) => `https://www.cheapshark.com/api/1.0/games?steamAppID=${appid}`;
+const CHEAPSHARK_GAME_API = (gameId) => `https://www.cheapshark.com/api/1.0/games?id=${gameId}`;
 
-// 2-second rate-limiting queue to avoid triggering bot / rate-limit protections
+async function fetchCheapSharkSummary(appid) {
+    try {
+        // Step 1: Find game ID by Steam AppID
+        const listText = await fetchText(CHEAPSHARK_APPID_API(appid), { Accept: "application/json" });
+        const list = JSON.parse(listText);
+        if (!Array.isArray(list) || list.length === 0 || !list[0].gameID) {
+            return null;
+        }
+
+        const gameId = list[0].gameID;
+
+        // Step 2: Fetch complete game price details with all-time historical lowest
+        const gameText = await fetchText(CHEAPSHARK_GAME_API(gameId), { Accept: "application/json" });
+        const data = JSON.parse(gameText);
+        if (!data || !data.cheapestPriceEver || !data.deals || data.deals.length === 0) {
+            return null;
+        }
+
+        // Find standard retail price from Steam deal or first deal
+        const steamDeal = data.deals.find((d) => d.storeID === "1") || data.deals[0];
+        const retailPrice = parseFloat(steamDeal.retailPrice);
+        const cheapestPrice = parseFloat(data.cheapestPriceEver.price);
+
+        if (Number.isFinite(retailPrice) && retailPrice > 0 && Number.isFinite(cheapestPrice)) {
+            const maxDiscount = Math.round(((retailPrice - cheapestPrice) / retailPrice) * 100);
+            if (maxDiscount > 0) {
+                console.log(`[swd-bg] CheapShark historical max discount for appid=${appid} (${data.info?.title}): allTimeMaxPercent=${maxDiscount}% (lowest: $${cheapestPrice}, retail: $${retailPrice})`);
+                return {
+                    appid,
+                    allTimeMaxPercent: maxDiscount,
+                    timesAtMax: 1,
+                    lastUpdatedAt: Date.now(),
+                };
+            }
+        }
+    } catch (e) {
+        console.warn(`[swd-bg] CheapShark API error for appid=${appid}:`, e);
+    }
+    return null;
+}
+
+const STEAMDB_APP_URL = (appid) => `https://steamdb.info/app/${appid}/`;
+
+// 10-second rate-limiting queue
 let queuePromise = Promise.resolve();
-const REQUEST_DELAY_MS = 2000;
+const REQUEST_DELAY_MS = 10000;
 
 function rateLimitedFetch(fn) {
     const next = queuePromise.then(async () => {
@@ -11,7 +54,6 @@ function rateLimitedFetch(fn) {
         await new Promise((res) => setTimeout(res, REQUEST_DELAY_MS));
         return result;
     });
-    // Update queuePromise so subsequent requests chain after this one
     queuePromise = next.catch(() => new Promise((res) => setTimeout(res, REQUEST_DELAY_MS)));
     return next;
 }
@@ -29,56 +71,27 @@ async function fetchText(url, extraHeaders = {}) {
     return await res.text();
 }
 
-async function fetchCheapSharkSummary(appid) {
-    try {
-        const text = await fetchText(CHEAPSHARK_API(appid), { Accept: "application/json" });
-        const data = JSON.parse(text);
-        if (!data || !data.cheapestPriceEver || !data.deals || data.deals.length === 0) {
-            return null;
-        }
-        const retailPrice = parseFloat(data.deals[0].retailPrice);
-        const cheapestPrice = parseFloat(data.cheapestPriceEver.price);
-        if (Number.isFinite(retailPrice) && retailPrice > 0 && Number.isFinite(cheapestPrice)) {
-            const maxDiscount = Math.round(((retailPrice - cheapestPrice) / retailPrice) * 100);
-            if (maxDiscount > 0) {
-                console.log(`[swd-bg] CheapShark success for appid=${appid}: allTimeMaxPercent=${maxDiscount}%`);
-                return {
-                    appid,
-                    allTimeMaxPercent: maxDiscount,
-                    timesAtMax: 1,
-                    lastUpdatedAt: Date.now(),
-                };
-            }
-        }
-    } catch (e) {
-        console.warn(`[swd-bg] CheapShark API error for appid=${appid}:`, e);
-    }
-    return null;
-}
-
 async function fetchDiscountSummary(appid) {
     return rateLimitedFetch(async () => {
-        console.log(`[swd-bg] Fetching price history for appid=${appid}...`);
+        console.log(`[swd-bg] Fetching historical discount data for appid=${appid}...`);
 
-        // 1. Primary: CheapShark API (instant public API, no Cloudflare challenges)
+        // 1. Primary: CheapShark API (all-time historical low lookup)
         const csSummary = await fetchCheapSharkSummary(appid);
         if (csSummary) {
             return csSummary;
         }
 
-        // 2. Secondary: SteamDB App Page HTML scraping
+        // 2. Secondary: SteamDB HTML scraping
         try {
             const html = await fetchText(STEAMDB_APP_URL(appid), {
                 Accept: "text/html,application/xhtml+xml",
             });
 
             if (
-                html.includes("Please do not scrape") ||
-                html.includes("Cloudflare") ||
-                html.includes("Checking your browser")
+                !html.includes("Please do not scrape") &&
+                !html.includes("Cloudflare") &&
+                !html.includes("Checking your browser")
             ) {
-                console.warn(`[swd-bg] SteamDB blocked with Cloudflare challenge for appid=${appid}`);
-            } else {
                 const summary = parseSteamdbHtml(html, appid);
                 if (summary) {
                     console.log(`[swd-bg] SteamDB HTML scraping success for appid=${appid}:`, summary);
@@ -86,10 +99,10 @@ async function fetchDiscountSummary(appid) {
                 }
             }
         } catch (err) {
-            console.warn(`[swd-bg] SteamDB fetch failed for appid=${appid}:`, err.message);
+            console.warn(`[swd-bg] SteamDB fetch error for appid=${appid}:`, err.message);
         }
 
-        console.warn(`[swd-bg] No discount history found for appid=${appid}`);
+        console.warn(`[swd-bg] No historical price records found for appid=${appid}`);
         return null;
     });
 }

@@ -3,25 +3,31 @@
   // src/core/discountLogic.ts
   function decideState(input) {
     const { currentDiscountPercent, summary, hadError } = input;
-    if (hadError || !summary) {
-      return {
-        state: "orange",
-        tooltip: "Could not retrieve discount history from SteamDB. Click 'Clear discount cache' and reload to retry."
-      };
-    }
     if (currentDiscountPercent === null || currentDiscountPercent <= 0) {
       return { state: "none", tooltip: "" };
     }
-    if (currentDiscountPercent === summary.allTimeMaxPercent) {
-      if (summary.timesAtMax <= 1) {
-        return {
-          state: "green",
-          tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), first time at this level.`
-        };
-      }
+    if (hadError || !summary) {
+      return {
+        state: "orange",
+        tooltip: "Could not retrieve historical discount records. Click 'Clear discount cache' and reload to retry."
+      };
+    }
+    if (currentDiscountPercent === summary.allTimeMaxPercent && summary.timesAtMax <= 1) {
+      return {
+        state: "green",
+        tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), first time at this level.`
+      };
+    }
+    if (currentDiscountPercent === summary.allTimeMaxPercent && summary.timesAtMax > 1) {
       return {
         state: "yellow",
         tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), seen ${summary.timesAtMax} times historically.`
+      };
+    }
+    if (currentDiscountPercent > summary.allTimeMaxPercent) {
+      return {
+        state: "green",
+        tooltip: `New all-time maximum discount (${currentDiscountPercent}%), beats recorded max of ${summary.allTimeMaxPercent}%.`
       };
     }
     if (currentDiscountPercent < summary.allTimeMaxPercent) {
@@ -31,8 +37,8 @@
       };
     }
     return {
-      state: "red",
-      tooltip: `Current ${currentDiscountPercent}% is at or above the recorded max of ${summary.allTimeMaxPercent}%.`
+      state: "none",
+      tooltip: ""
     };
   }
 
@@ -99,47 +105,48 @@
       } catch {
       }
     }
-    const appLinks = doc.querySelectorAll(SELECTORS.appLinkSelector);
+    const appLinks = Array.from(doc.querySelectorAll(SELECTORS.appLinkSelector));
     if (appLinks.length > 0) {
+      const totalUniqueAppids = new Set();
+      appLinks.forEach((a) => {
+        const id = parseAppid(a.href);
+        if (id) totalUniqueAppids.add(id);
+      });
       let candidate = appLinks[0].parentElement;
+      let bestContainer = null;
       let depth = 0;
-      while (candidate && candidate !== doc.body && depth < 12) {
-        const linksInside = candidate.querySelectorAll(SELECTORS.appLinkSelector).length;
-        if (linksInside >= 2) {
-          console.log("[swd] container found via dynamic fallback at depth", depth, candidate.tagName, candidate.className);
-          return candidate;
+      while (candidate && candidate !== doc.body && depth < 15) {
+        const distinctInCandidate = new Set();
+        candidate.querySelectorAll(SELECTORS.appLinkSelector).forEach((a) => {
+          const id = parseAppid(a.href);
+          if (id) distinctInCandidate.add(id);
+        });
+        if (distinctInCandidate.size >= Math.min(2, totalUniqueAppids.size) && distinctInCandidate.size > 0) {
+          bestContainer = candidate;
         }
         candidate = candidate.parentElement;
         depth++;
       }
-      if (appLinks.length === 1 && appLinks[0].parentElement?.parentElement) {
-        const fallback = appLinks[0].parentElement.parentElement;
-        console.log("[swd] container: single-link fallback", fallback.tagName);
-        return fallback;
+      if (bestContainer) {
+        console.log("[swd] container found holding", totalUniqueAppids.size, "games:", bestContainer.tagName, bestContainer.className);
+        return bestContainer;
       }
     }
-    console.warn("[swd] could not find wishlist container");
-    return null;
+    return doc.body;
   }
   function findRowElements(container) {
-    const rows = [];
     const appLinks = Array.from(
       container.querySelectorAll(SELECTORS.appLinkSelector)
     );
+    const seenAppids = new Set();
+    const rows = [];
     for (const a of appLinks) {
+      const appid = parseAppid(a.href);
+      if (!appid || seenAppids.has(appid)) continue;
       const card = findOuterCard(a, container);
-      if (card && card !== container && !rows.includes(card)) {
+      if (card && card !== container) {
+        seenAppids.add(appid);
         rows.push(card);
-      }
-    }
-    if (rows.length === 0) {
-      for (const sel of SELECTORS.rowCandidates) {
-        try {
-          container.querySelectorAll(sel).forEach((el) => {
-            if (el !== container && !rows.includes(el)) rows.push(el);
-          });
-        } catch {
-        }
       }
     }
     return rows;
@@ -349,7 +356,6 @@
     }
     try {
       const result = await fetchPromise;
-      console.log("[swd] rendering appid=", info.appid, "discount=", info.currentDiscountPercent, "result=", result);
       renderDecision(
         info,
         decideState({
@@ -363,17 +369,14 @@
     }
   }
   function renderDecision(info, decision) {
-    /* Remove any existing icons from both the element and its parent */
     info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
     info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
-    console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
     if (decision.state === "none") return;
     const span = document.createElement("span");
     span.className = ICON_CLASS;
     span.setAttribute("data-swd-state", decision.state);
     span.setAttribute("title", decision.tooltip);
     span.textContent = emojiFor(decision.state);
-    /* Try inserting as sibling after titleEl to avoid overflow:hidden clipping */
     if (info.titleEl.parentElement) {
       info.titleEl.parentElement.insertBefore(span, info.titleEl.nextSibling);
     } else {
@@ -434,75 +437,47 @@
       const n = await clearAllSummaries();
       btn.textContent = n > 0 ? `Cleared ${n} entries \u2014 reload to refresh` : "Nothing to clear";
       setTimeout(() => btn.textContent = "Clear discount cache", 4e3);
-      const container = findWishlistContainer(document);
-      if (container) {
-        for (const row of findRowElements(container)) {
-          row.removeAttribute(PROCESSED_ATTR);
-          const info = extractRowInfo(row);
-          if (info) void processRow(info);
-        }
+      const container = findWishlistContainer(document) || document.body;
+      for (const row of findRowElements(container)) {
+        row.removeAttribute(PROCESSED_ATTR);
+        const info = extractRowInfo(row);
+        if (info) void processRow(info);
       }
     });
     document.body.appendChild(btn);
   }
-  function scanInitial(container) {
+  function scanAll() {
+    const container = findWishlistContainer(document) || document.body;
     const rows = findRowElements(container);
-    console.log("[swd] container found, rows:", rows.length, container);
-    let processed = 0;
-    let skipped = 0;
     for (const row of rows) {
-      const info = extractRowInfo(row);
-      if (info) {
-        processed++;
-        console.log("[swd] row appid=", info.appid, "discount=", info.currentDiscountPercent, info.rowEl);
-        void processRow(info);
-      } else {
-        skipped++;
+      const needsProcessing = !row.hasAttribute(PROCESSED_ATTR);
+      const hasIcon = !!row.querySelector(`.${ICON_CLASS}`) || !!row.parentElement?.querySelector(`.${ICON_CLASS}`);
+      if (needsProcessing || !hasIcon) {
+        row.removeAttribute(PROCESSED_ATTR);
+        const info = extractRowInfo(row);
+        if (info) void processRow(info);
       }
     }
-    console.log(`[swd] processed=${processed} skipped=${skipped}`);
   }
   function bootstrap() {
     injectStylesOnce();
     injectClearCacheButton();
-    const tryInit = () => {
-      const container = findWishlistContainer(document);
-      if (!container || container.hasAttribute("data-swd-bound")) return false;
-      container.setAttribute("data-swd-bound", "1");
-      scanInitial(container);
-      attachWishlistObserver(container, (added) => {
-        for (const node of added) {
-          const nodeMatches = typeof node.matches === "function" && node.matches("[href*='/app/']");
-          const hasChild = !!node.querySelector?.("[href*='/app/']");
-          if (nodeMatches || hasChild) {
-            const parent = nodeMatches ? node : node.querySelector(
-              "[data-app-id], [data-ds-appid], div.wishlist_row, div.Row, .search_result_row, [class*='wishlistRow']"
-            );
-            if (parent) {
-              const info = extractRowInfo(parent);
-              if (info) void processRow(info);
-            } else {
-              const info = extractRowInfo(node);
-              if (info) void processRow(info);
-            }
-          } else if (
-            node instanceof HTMLElement &&
-            (node.hasAttribute("data-ds-appid") ||
-              node.hasAttribute("data-app-id") ||
-              node.classList?.contains("search_result_row"))
-          ) {
-            const info = extractRowInfo(node);
-            if (info) void processRow(info);
-          }
-        }
-      });
-      return true;
+    scanAll();
+    setTimeout(scanAll, 500);
+    setTimeout(scanAll, 1500);
+    let scanScheduled = false;
+    const debouncedScan = () => {
+      if (!scanScheduled) {
+        scanScheduled = true;
+        requestAnimationFrame(() => {
+          scanScheduled = false;
+          scanAll();
+        });
+      }
     };
-    if (tryInit()) return;
-    const rootObserver = new MutationObserver(() => {
-      if (tryInit()) rootObserver.disconnect();
-    });
+    const rootObserver = new MutationObserver(debouncedScan);
     rootObserver.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("scroll", debouncedScan, { passive: true });
   }
   if (document.readyState === "complete" || document.readyState === "interactive") {
     bootstrap();
