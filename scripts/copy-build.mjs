@@ -11,7 +11,7 @@ if (!existsSync(src)) {
   process.exit(1);
 }
 
-const dirs = ["background", "content", "core"];
+const dirs = ["background", "core"];
 for (const d of dirs) {
   const from = join(src, d);
   const to = join(root, d);
