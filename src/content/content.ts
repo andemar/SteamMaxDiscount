@@ -20,103 +20,58 @@ type SummaryResp =
   | { ok: true; summary: DiscountSummary | null }
   | { ok: false; error: string };
 
-const inFlight = new Map<number, Promise<void>>();
-
-function pLimit(concurrency: number) {
-  const queue: Array<() => void> = [];
-  let active = 0;
-  return async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (active >= concurrency) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active++;
-    try {
-      return await fn();
-    } finally {
-      active--;
-      queue.shift()?.();
-    }
-  };
-}
-const limited = pLimit(4);
-
-async function requestSummary(appid: number): Promise<SummaryResp> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      { type: "getDiscountSummary", appid },
-      (resp: SwdRawResponse | undefined) => {
-        if (resp && (resp as SwdRawResponse).ok) {
-          const r = resp as { ok: true; summary: DiscountSummary | null };
-          resolve({ ok: true, summary: r.summary ?? null });
-        } else {
-          const r = resp as { ok?: false; error?: string };
-          resolve({ ok: false, error: r?.error ?? "unknown" });
-        }
-      }
-    );
-  });
+interface FetchSummaryResult {
+  summary: DiscountSummary | null;
+  hadError: boolean;
 }
 
-type SwdRawResponse =
-  | { ok: true; summary: DiscountSummary | null }
-  | { ok: false; error: string };
+const inFlight = new Map<number, Promise<FetchSummaryResult>>();
+
+async function fetchSummaryForAppid(appid: number): Promise<FetchSummaryResult> {
+  let summary = await storage.getSummary(appid);
+  if (!summary) {
+    const resp = await limited(() => requestSummary(appid));
+    if (resp.ok) {
+      summary = resp.summary;
+      if (summary) await storage.setSummary(summary);
+    } else {
+      return { summary: null, hadError: true };
+    }
+  }
+  if (!summary) {
+    return { summary: null, hadError: true };
+  }
+  return { summary, hadError: false };
+}
 
 async function processRow(info: WishlistRowInfo): Promise<void> {
   if (info.rowEl.hasAttribute(PROCESSED_ATTR)) return;
   info.rowEl.setAttribute(PROCESSED_ATTR, "1");
 
-  const existing = inFlight.get(info.appid);
-  if (existing) {
-    await existing;
-    return;
+  let fetchPromise = inFlight.get(info.appid);
+  if (!fetchPromise) {
+    fetchPromise = fetchSummaryForAppid(info.appid);
+    inFlight.set(info.appid, fetchPromise);
   }
 
-  const task = (async () => {
-    let summary = await storage.getSummary(info.appid);
-
-    if (!summary) {
-      const resp = await limited(() => requestSummary(info.appid));
-      if (resp.ok) {
-        summary = resp.summary;
-        if (summary) await storage.setSummary(summary);
-      } else {
-        renderDecision(
-          info,
-          decideState({
-            currentDiscountPercent: info.currentDiscountPercent,
-            summary: null,
-            hadError: true,
-          })
-        );
-        return;
-      }
-    }
-
-    if (!summary) {
-      renderDecision(
-        info,
-        decideState({
-          currentDiscountPercent: info.currentDiscountPercent,
-          summary: null,
-          hadError: true,
-        })
-      );
-      return;
-    }
-
+  try {
+    const result = await fetchPromise;
+    console.log(
+      "[swd] rendering appid=",
+      info.appid,
+      "discount=",
+      info.currentDiscountPercent,
+      "result=",
+      result
+    );
     renderDecision(
       info,
       decideState({
         currentDiscountPercent: info.currentDiscountPercent,
-        summary,
-        hadError: false,
+        summary: result.summary,
+        hadError: result.hadError,
       })
     );
-  })();
-
-  inFlight.set(info.appid, task);
-  try {
-    await task;
   } finally {
     inFlight.delete(info.appid);
   }
@@ -124,7 +79,9 @@ async function processRow(info: WishlistRowInfo): Promise<void> {
 
 function renderDecision(info: WishlistRowInfo, decision: Decision): void {
   info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+  info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
 
+  console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
   if (decision.state === "none") return;
 
   const span = document.createElement("span");
@@ -132,13 +89,12 @@ function renderDecision(info: WishlistRowInfo, decision: Decision): void {
   span.setAttribute("data-swd-state", decision.state);
   span.setAttribute("title", decision.tooltip);
   span.textContent = emojiFor(decision.state);
-  span.style.marginLeft = "6px";
-  span.style.display = "inline-block";
-  span.style.fontSize = "0.95em";
-  span.style.verticalAlign = "middle";
-  span.style.cursor = "help";
 
-  info.titleEl.appendChild(span);
+  if (info.titleEl.parentElement) {
+    info.titleEl.parentElement.insertBefore(span, info.titleEl.nextSibling);
+  } else {
+    info.titleEl.appendChild(span);
+  }
 }
 
 function emojiFor(state: DiscountState): string {
@@ -161,7 +117,20 @@ function injectStylesOnce(): void {
   const s = document.createElement("style");
   s.id = STYLE_ID;
   s.textContent = `
-    .${ICON_CLASS} { line-height: 1; }
+    .${ICON_CLASS} {
+      display: inline-block !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      overflow: visible !important;
+      position: relative !important;
+      z-index: 100 !important;
+      margin-left: 6px;
+      font-size: 1.1em;
+      line-height: 1;
+      vertical-align: middle;
+      cursor: help;
+      flex-shrink: 0;
+    }
     #swd-clear-cache-btn {
       position: fixed; right: 16px; bottom: 16px;
       background: #1b2838; color: #c7d5e0;
@@ -234,16 +203,30 @@ function bootstrap(): void {
         const hasChild = !!node.querySelector?.("[href*='/app/']");
 
         if (nodeMatches || hasChild) {
+          /* Try to find the row element from the added node */
           const parent =
             (nodeMatches
               ? node
               : (node as HTMLElement).querySelector(
-                  "[data-app-id], div.wishlist_row, div.Row"
+                  "[data-app-id], [data-ds-appid], div.wishlist_row, div.Row, .search_result_row, [class*='wishlistRow']"
                 )) as HTMLElement | null;
           if (parent) {
             const info = extractRowInfo(parent);
             if (info) void processRow(info);
+          } else {
+            /* Fallback: the added node itself may be the row */
+            const info = extractRowInfo(node as HTMLElement);
+            if (info) void processRow(info);
           }
+        } else if (
+          node instanceof HTMLElement &&
+          (node.hasAttribute("data-ds-appid") ||
+            node.hasAttribute("data-app-id") ||
+            node.classList?.contains("search_result_row"))
+        ) {
+          /* The added node IS a row */
+          const info = extractRowInfo(node);
+          if (info) void processRow(info);
         }
       }
     });

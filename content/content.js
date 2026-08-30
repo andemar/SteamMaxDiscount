@@ -43,12 +43,24 @@
       ".wishlist_ctn",
       "div.wishlist_rows",
       "div[data-feature-target='wishlist']",
-      "div._wishlist_rows_"
+      "div._wishlist_rows_",
+      "#wishlist_items",
+      ".wishlist_items",
+      "[class*='wishlistItems']",
+      "[class*='WishlistItems']",
+      "[class*='wishlist_row']",
+      "[id*='wishlist']"
     ],
     rowCandidates: [
       "div.wishlist_row",
       "div.Row",
-      "div[data-app-id]"
+      "div[data-app-id]",
+      "div[data-ds-appid]",
+      "a[data-ds-appid]",
+      ".search_result_row",
+      "[class*='wishlistRow']",
+      "[class*='WishlistRow']",
+      "[class*='wishlist_row']"
     ],
     appLinkSelector: "a[href*='/app/']",
     titleCandidates: [
@@ -56,9 +68,13 @@
       "h2.title",
       "div.title",
       "a.title",
+      ".game_name",
+      "[class*='gameName']",
+      "[class*='GameName']",
+      "[class*='game_name']",
+      "[class*='title']",
       "h2",
       "h3",
-      "[class*='title']",
       "a[href*='/app/']"
     ],
     discountCandidates: [
@@ -66,39 +82,78 @@
       ".discount-percentage",
       "div.discount_block .discount_pct",
       "span.discount_pct",
+      "[class*='discountPct']",
+      "[class*='DiscountPct']",
+      "[class*='discount_pct']",
       "[class*='discount']"
     ]
   };
   function findWishlistContainer(doc) {
     for (const sel of SELECTORS.containerCandidates) {
-      const el = doc.querySelector(sel);
-      if (el instanceof HTMLElement) return el;
+      try {
+        const el = doc.querySelector(sel);
+        if (el instanceof HTMLElement) {
+          console.log("[swd] container matched selector:", sel);
+          return el;
+        }
+      } catch {
+      }
     }
+    const appLinks = doc.querySelectorAll(SELECTORS.appLinkSelector);
+    if (appLinks.length > 0) {
+      let candidate = appLinks[0].parentElement;
+      let depth = 0;
+      while (candidate && candidate !== doc.body && depth < 12) {
+        const linksInside = candidate.querySelectorAll(SELECTORS.appLinkSelector).length;
+        if (linksInside >= 2) {
+          console.log("[swd] container found via dynamic fallback at depth", depth, candidate.tagName, candidate.className);
+          return candidate;
+        }
+        candidate = candidate.parentElement;
+        depth++;
+      }
+      if (appLinks.length === 1 && appLinks[0].parentElement?.parentElement) {
+        const fallback = appLinks[0].parentElement.parentElement;
+        console.log("[swd] container: single-link fallback", fallback.tagName);
+        return fallback;
+      }
+    }
+    console.warn("[swd] could not find wishlist container");
     return null;
   }
   function findRowElements(container) {
     const rows = [];
-    for (const sel of SELECTORS.rowCandidates) {
-      container.querySelectorAll(sel).forEach((el) => {
-        if (el !== container && !rows.includes(el)) rows.push(el);
-      });
-    }
-    for (const a of Array.from(
+    const appLinks = Array.from(
       container.querySelectorAll(SELECTORS.appLinkSelector)
-    )) {
+    );
+    for (const a of appLinks) {
       const card = findOuterCard(a, container);
-      if (card && card !== container && !rows.includes(card)) rows.push(card);
+      if (card && card !== container && !rows.includes(card)) {
+        rows.push(card);
+      }
+    }
+    if (rows.length === 0) {
+      for (const sel of SELECTORS.rowCandidates) {
+        try {
+          container.querySelectorAll(sel).forEach((el) => {
+            if (el !== container && !rows.includes(el)) rows.push(el);
+          });
+        } catch {
+        }
+      }
     }
     return rows;
   }
-  function findOuterCard(link, stopAt) {
+  function findOuterCard(link, container) {
     let cur = link.parentElement;
-    let best = null;
+    let best = link.parentElement;
     let depth = 0;
-    while (cur && cur !== stopAt && depth < 8) {
-      if (cur.querySelector(SELECTORS.discountCandidates.join(","))) {
+    while (cur && cur !== container && depth < 10) {
+      if (cur.parentElement === container) {
+        return cur;
+      }
+      if (cur.querySelector(SELECTORS.discountCandidates.join(",")) && cur.querySelector(SELECTORS.appLinkSelector)) {
         best = cur;
-        break;
       }
       cur = cur.parentElement;
       depth++;
@@ -120,32 +175,56 @@
     let titleEl = null;
     let href = "";
     for (const sel of SELECTORS.titleCandidates) {
-      const cand = rowEl.querySelector(sel);
-      if (cand) {
-        titleEl = cand;
-        href = cand instanceof HTMLAnchorElement ? cand.href : cand.querySelector("a")?.href ?? "";
-        if (href) break;
+      try {
+        const candidates = rowEl.querySelectorAll(sel);
+        for (const cand of Array.from(candidates)) {
+          const text = cand.textContent?.trim();
+          if (text && text.length > 0 && !text.endsWith("%")) {
+            titleEl = cand;
+            href = cand instanceof HTMLAnchorElement ? cand.href : cand.querySelector("a")?.href ?? "";
+            if (href) break;
+          }
+        }
+        if (titleEl && href) break;
+      } catch {
       }
     }
     if (!href) {
-      const anchor = rowEl.querySelector(
-        SELECTORS.appLinkSelector
-      );
-      if (anchor) href = anchor.href;
+      const anchors = rowEl.querySelectorAll(SELECTORS.appLinkSelector);
+      for (const a of Array.from(anchors)) {
+        if (a.href) {
+          href = a.href;
+          if (!titleEl && a.textContent?.trim()) {
+            titleEl = a;
+          }
+          break;
+        }
+      }
+    }
+    if (!href) {
+      const dsAppid = rowEl.getAttribute("data-ds-appid");
+      if (dsAppid) href = `https://store.steampowered.com/app/${dsAppid}/`;
     }
     if (!href) {
       const dataAttr = rowEl.getAttribute("data-app-id");
       if (dataAttr) href = `https://store.steampowered.com/app/${dataAttr}/`;
+    }
+    if (!titleEl && href) {
+      const anchor = rowEl.querySelector(SELECTORS.appLinkSelector);
+      titleEl = anchor ?? rowEl;
     }
     if (!titleEl || !href) return null;
     const appid = parseAppid(href);
     if (!appid) return null;
     let currentDiscountPercent = null;
     for (const sel of SELECTORS.discountCandidates) {
-      const cand = rowEl.querySelector(sel);
-      if (cand?.textContent) {
-        currentDiscountPercent = parseDiscountText(cand.textContent);
-        if (currentDiscountPercent !== null) break;
+      try {
+        const cand = rowEl.querySelector(sel);
+        if (cand?.textContent) {
+          currentDiscountPercent = parseDiscountText(cand.textContent);
+          if (currentDiscountPercent !== null) break;
+        }
+      } catch {
       }
     }
     if (currentDiscountPercent === null) {
@@ -244,74 +323,62 @@
       );
     });
   }
+  async function fetchSummaryForAppid(appid) {
+    let summary = await getSummary(appid);
+    if (!summary) {
+      const resp = await limited(() => requestSummary(appid));
+      if (resp.ok) {
+        summary = resp.summary;
+        if (summary) await setSummary(summary);
+      } else {
+        return { summary: null, hadError: true };
+      }
+    }
+    if (!summary) {
+      return { summary: null, hadError: true };
+    }
+    return { summary, hadError: false };
+  }
   async function processRow(info) {
     if (info.rowEl.hasAttribute(PROCESSED_ATTR)) return;
     info.rowEl.setAttribute(PROCESSED_ATTR, "1");
-    const existing = inFlight.get(info.appid);
-    if (existing) {
-      await existing;
-      return;
+    let fetchPromise = inFlight.get(info.appid);
+    if (!fetchPromise) {
+      fetchPromise = fetchSummaryForAppid(info.appid);
+      inFlight.set(info.appid, fetchPromise);
     }
-    const task = (async () => {
-      let summary = await getSummary(info.appid);
-      if (!summary) {
-        const resp = await limited(() => requestSummary(info.appid));
-        if (resp.ok) {
-          summary = resp.summary;
-          if (summary) await setSummary(summary);
-        } else {
-          renderDecision(
-            info,
-            decideState({
-              currentDiscountPercent: info.currentDiscountPercent,
-              summary: null,
-              hadError: true
-            })
-          );
-          return;
-        }
-      }
-      if (!summary) {
-        renderDecision(
-          info,
-          decideState({
-            currentDiscountPercent: info.currentDiscountPercent,
-            summary: null,
-            hadError: true
-          })
-        );
-        return;
-      }
+    try {
+      const result = await fetchPromise;
+      console.log("[swd] rendering appid=", info.appid, "discount=", info.currentDiscountPercent, "result=", result);
       renderDecision(
         info,
         decideState({
           currentDiscountPercent: info.currentDiscountPercent,
-          summary,
-          hadError: false
+          summary: result.summary,
+          hadError: result.hadError
         })
       );
-    })();
-    inFlight.set(info.appid, task);
-    try {
-      await task;
     } finally {
       inFlight.delete(info.appid);
     }
   }
   function renderDecision(info, decision) {
+    /* Remove any existing icons from both the element and its parent */
     info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+    info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+    console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
     if (decision.state === "none") return;
     const span = document.createElement("span");
     span.className = ICON_CLASS;
     span.setAttribute("data-swd-state", decision.state);
     span.setAttribute("title", decision.tooltip);
     span.textContent = emojiFor(decision.state);
-    span.style.marginLeft = "6px";
-    span.style.display = "inline-block";
-    span.style.fontSize = "0.95em";
-    span.style.verticalAlign = "middle";
-    span.style.cursor = "help";
-    info.titleEl.appendChild(span);
+    /* Try inserting as sibling after titleEl to avoid overflow:hidden clipping */
+    if (info.titleEl.parentElement) {
+      info.titleEl.parentElement.insertBefore(span, info.titleEl.nextSibling);
+    } else {
+      info.titleEl.appendChild(span);
+    }
   }
   function emojiFor(state) {
     switch (state) {
@@ -332,7 +399,20 @@
     const s = document.createElement("style");
     s.id = STYLE_ID;
     s.textContent = `
-    .${ICON_CLASS} { line-height: 1; }
+    .${ICON_CLASS} {
+      display: inline-block !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      overflow: visible !important;
+      position: relative !important;
+      z-index: 100 !important;
+      margin-left: 6px;
+      font-size: 1.1em;
+      line-height: 1;
+      vertical-align: middle;
+      cursor: help;
+      flex-shrink: 0;
+    }
     #swd-clear-cache-btn {
       position: fixed; right: 16px; bottom: 16px;
       background: #1b2838; color: #c7d5e0;
@@ -396,12 +476,23 @@
           const hasChild = !!node.querySelector?.("[href*='/app/']");
           if (nodeMatches || hasChild) {
             const parent = nodeMatches ? node : node.querySelector(
-              "[data-app-id], div.wishlist_row, div.Row"
+              "[data-app-id], [data-ds-appid], div.wishlist_row, div.Row, .search_result_row, [class*='wishlistRow']"
             );
             if (parent) {
               const info = extractRowInfo(parent);
               if (info) void processRow(info);
+            } else {
+              const info = extractRowInfo(node);
+              if (info) void processRow(info);
             }
+          } else if (
+            node instanceof HTMLElement &&
+            (node.hasAttribute("data-ds-appid") ||
+              node.hasAttribute("data-app-id") ||
+              node.classList?.contains("search_result_row"))
+          ) {
+            const info = extractRowInfo(node);
+            if (info) void processRow(info);
           }
         }
       });

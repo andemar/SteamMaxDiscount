@@ -10,43 +10,118 @@
 import type { DiscountState, DiscountSummary, SwdMessage, SwdResponse } from "../core/types";
 
 const STEAMDB_APP_URL = (appid: number) => `https://steamdb.info/app/${appid}/`;
-const STEAMDB_PRICE_HISTORY_API = (appid: number, cc = "us") =>
-  `https://steamdb.info/api/GetPriceHistory/?appid=${appid}&cc=${cc}`;
+const CHEAPSHARK_API = (appid: number) =>
+  `https://www.cheapshark.com/api/1.0/games?steamAppID=${appid}`;
+
+// 2-second rate-limiting queue to avoid triggering bot / rate-limit protections
+let queuePromise = Promise.resolve();
+const REQUEST_DELAY_MS = 2000;
+
+function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
+  const next = queuePromise.then(async () => {
+    const result = await fn();
+    await new Promise((res) => setTimeout(res, REQUEST_DELAY_MS));
+    return result;
+  });
+  queuePromise = next.catch(() => new Promise((res) => setTimeout(res, REQUEST_DELAY_MS)));
+  return next;
+}
 
 async function fetchText(
   url: string,
-  extraHeaders: Record<string, string>
+  extraHeaders: Record<string, string> = {}
 ): Promise<string> {
   const res = await fetch(url, {
     method: "GET",
-    credentials: "omit",
-    redirect: "follow",
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
       ...extraHeaders,
     },
   });
-  if (!res.ok) throw new Error(`SteamDB fetch failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} (${res.statusText}) for ${url}`);
+  }
   return await res.text();
 }
 
-async function fetchDiscountSummary(appid: number): Promise<DiscountSummary | null> {
+async function fetchCheapSharkSummary(
+  appid: number
+): Promise<DiscountSummary | null> {
   try {
-    const json = await fetchText(STEAMDB_PRICE_HISTORY_API(appid), {
+    const text = await fetchText(CHEAPSHARK_API(appid), {
       Accept: "application/json",
     });
-    const summary = parseSteamdbJson(json, appid);
-    if (summary) return summary;
-  } catch {
-    // fall through to HTML
+    const data = JSON.parse(text);
+    if (
+      !data ||
+      !data.cheapestPriceEver ||
+      !data.deals ||
+      data.deals.length === 0
+    ) {
+      return null;
+    }
+    const retailPrice = parseFloat(data.deals[0].retailPrice);
+    const cheapestPrice = parseFloat(data.cheapestPriceEver.price);
+    if (
+      Number.isFinite(retailPrice) &&
+      retailPrice > 0 &&
+      Number.isFinite(cheapestPrice)
+    ) {
+      const maxDiscount = Math.round(
+        ((retailPrice - cheapestPrice) / retailPrice) * 100
+      );
+      if (maxDiscount > 0) {
+        console.log(`[swd-bg] CheapShark success for appid=${appid}: allTimeMaxPercent=${maxDiscount}%`);
+        return {
+          appid,
+          allTimeMaxPercent: maxDiscount,
+          timesAtMax: 1,
+          lastUpdatedAt: Date.now(),
+        };
+      }
+    }
+  } catch (e) {
+    console.warn(`[swd-bg] CheapShark API error for appid=${appid}:`, e);
   }
-  const html = await fetchText(STEAMDB_APP_URL(appid), {
-    Accept: "text/html,application/xhtml+xml",
+  return null;
+}
+
+async function fetchDiscountSummary(appid: number): Promise<DiscountSummary | null> {
+  return rateLimitedFetch(async () => {
+    console.log(`[swd-bg] Fetching price history for appid=${appid}...`);
+
+    // 1. Primary: CheapShark API (instant public API, no Cloudflare challenges)
+    const csSummary = await fetchCheapSharkSummary(appid);
+    if (csSummary) {
+      return csSummary;
+    }
+
+    // 2. Secondary: SteamDB App Page HTML scraping
+    try {
+      const html = await fetchText(STEAMDB_APP_URL(appid), {
+        Accept: "text/html,application/xhtml+xml",
+      });
+
+      if (
+        html.includes("Please do not scrape") ||
+        html.includes("Cloudflare") ||
+        html.includes("Checking your browser")
+      ) {
+        console.warn(`[swd-bg] SteamDB blocked with Cloudflare challenge for appid=${appid}`);
+      } else {
+        const summary = parseSteamdbHtml(html, appid);
+        if (summary) {
+          console.log(`[swd-bg] SteamDB HTML scraping success for appid=${appid}:`, summary);
+          return summary;
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[swd-bg] SteamDB fetch failed for appid=${appid}:`, msg);
+    }
+
+    console.warn(`[swd-bg] No discount history found for appid=${appid}`);
+    return null;
   });
-  return parseSteamdbHtml(html, appid);
 }
 
 function parseSteamdbJson(text: string, appid: number): DiscountSummary | null {
@@ -91,7 +166,7 @@ function parseSteamdbHtml(html: string, appid: number): DiscountSummary | null {
     const table = tables[i];
     const head = table.querySelector("thead");
     const headText = (head?.textContent ?? "").toLowerCase();
-    if (!/discount|price\s*change/.test(headText)) continue;
+    if (!/discount|price\s*change|history/.test(headText)) continue;
 
     const trs = table.querySelectorAll("tbody tr");
     for (let j = 0; j < trs.length; j++) {
@@ -102,11 +177,11 @@ function parseSteamdbHtml(html: string, appid: number): DiscountSummary | null {
   }
 
   if (discounts.length === 0) {
-    const matches = html.match(/-?\d{1,3}\s*%/g);
+    const matches = html.match(/-\d{1,3}\s*%/g);
     if (matches) {
       for (const m of matches) {
         const pct = parseDiscount(m);
-        if (pct !== null && pct > 0) discounts.push(pct);
+        if (pct !== null && pct > 0 && pct <= 100) discounts.push(pct);
       }
     }
   }
