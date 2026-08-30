@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Steam Wishlist Max-Discount Decorator",
+  "version": "1.0.0",
+  "description": "Adds a colored circle to each discounted game in your Steam wishlist, comparing it to its all-time max discount on SteamDB.",
+  "minimum_chrome_version": "114",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://store.steampowered.com/*",
+    "https://steamdb.info/*"
+  ],
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://store.steampowered.com/wishlist*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Steam Wishlist Discount Decorator"
+  }
+}
