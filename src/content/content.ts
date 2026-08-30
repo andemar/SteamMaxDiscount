@@ -206,34 +206,45 @@ function scanInitial(container: HTMLElement): void {
 
 function bootstrap(): void {
   injectStylesOnce();
-
-  const container = findWishlistContainer(document);
-  if (!container) return;
-
   injectClearCacheButton();
-  scanInitial(container);
 
-  attachWishlistObserver(container, (added) => {
-    for (const node of added) {
-      const nodeMatches =
-        typeof node.matches === "function" &&
-        (node as HTMLElement).matches("[href*='/app/']");
-      const hasChild = !!node.querySelector?.("[href*='/app/']");
+  const tryInit = (): boolean => {
+    const container = findWishlistContainer(document);
+    if (!container || container.hasAttribute("data-swd-bound")) return false;
+    container.setAttribute("data-swd-bound", "1");
 
-      if (nodeMatches || hasChild) {
-        const parent =
-          (nodeMatches
-            ? node
-            : (node as HTMLElement).querySelector(
-                "[data-app-id], div.wishlist_row, div.Row"
-              )) as HTMLElement | null;
-        if (parent) {
-          const info = extractRowInfo(parent);
-          if (info) void processRow(info);
+    scanInitial(container);
+
+    attachWishlistObserver(container, (added) => {
+      for (const node of added) {
+        const nodeMatches =
+          typeof node.matches === "function" &&
+          (node as HTMLElement).matches("[href*='/app/']");
+        const hasChild = !!node.querySelector?.("[href*='/app/']");
+
+        if (nodeMatches || hasChild) {
+          const parent =
+            (nodeMatches
+              ? node
+              : (node as HTMLElement).querySelector(
+                  "[data-app-id], div.wishlist_row, div.Row"
+                )) as HTMLElement | null;
+          if (parent) {
+            const info = extractRowInfo(parent);
+            if (info) void processRow(info);
+          }
         }
       }
-    }
+    });
+    return true;
+  };
+
+  if (tryInit()) return;
+
+  const rootObserver = new MutationObserver(() => {
+    if (tryInit()) rootObserver.disconnect();
   });
+  rootObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 if (document.readyState === "complete" || document.readyState === "interactive") {

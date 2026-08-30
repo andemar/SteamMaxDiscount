@@ -168,28 +168,39 @@ function scanInitial(container) {
 }
 function bootstrap() {
     injectStylesOnce();
-    const container = findWishlistContainer(document);
-    if (!container)
-        return;
     injectClearCacheButton();
-    scanInitial(container);
-    attachWishlistObserver(container, (added) => {
-        for (const node of added) {
-            const nodeMatches = typeof node.matches === "function" &&
-                node.matches("[href*='/app/']");
-            const hasChild = !!node.querySelector?.("[href*='/app/']");
-            if (nodeMatches || hasChild) {
-                const parent = (nodeMatches
-                    ? node
-                    : node.querySelector("[data-app-id], div.wishlist_row, div.Row"));
-                if (parent) {
-                    const info = extractRowInfo(parent);
-                    if (info)
-                        void processRow(info);
+    const tryInit = () => {
+        const container = findWishlistContainer(document);
+        if (!container || container.hasAttribute("data-swd-bound"))
+            return false;
+        container.setAttribute("data-swd-bound", "1");
+        scanInitial(container);
+        attachWishlistObserver(container, (added) => {
+            for (const node of added) {
+                const nodeMatches = typeof node.matches === "function" &&
+                    node.matches("[href*='/app/']");
+                const hasChild = !!node.querySelector?.("[href*='/app/']");
+                if (nodeMatches || hasChild) {
+                    const parent = (nodeMatches
+                        ? node
+                        : node.querySelector("[data-app-id], div.wishlist_row, div.Row"));
+                    if (parent) {
+                        const info = extractRowInfo(parent);
+                        if (info)
+                            void processRow(info);
+                    }
                 }
             }
-        }
+        });
+        return true;
+    };
+    if (tryInit())
+        return;
+    const rootObserver = new MutationObserver(() => {
+        if (tryInit())
+            rootObserver.disconnect();
     });
+    rootObserver.observe(document.body, { childList: true, subtree: true });
 }
 if (document.readyState === "complete" || document.readyState === "interactive") {
     bootstrap();
