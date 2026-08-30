@@ -198,10 +198,21 @@ function injectClearCacheButton(): void {
 }
 
 function scanInitial(container: HTMLElement): void {
-  for (const row of findRowElements(container)) {
+  const rows = findRowElements(container);
+  console.log("[swd] container found, rows:", rows.length, container);
+  let processed = 0;
+  let skipped = 0;
+  for (const row of rows) {
     const info = extractRowInfo(row);
-    if (info) void processRow(info);
+    if (info) {
+      processed++;
+      console.log("[swd] row appid=", info.appid, "discount=", info.currentDiscountPercent, info.rowEl);
+      void processRow(info);
+    } else {
+      skipped++;
+    }
   }
+  console.log(`[swd] processed=${processed} skipped=${skipped}`);
 }
 
 function bootstrap(): void {
