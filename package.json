@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-build.mjs && node scripts/bundle-content.mjs",
     "watch": "tsc -p tsconfig.json --watch",
-    "test": "node --import tsx --test test/discountLogic.test.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "clean": "rimraf dist background content core"
   },
   "devDependencies": {

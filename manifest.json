@@ -7,8 +7,7 @@
   "permissions": ["storage"],
   "host_permissions": [
     "https://store.steampowered.com/*",
-    "https://steamdb.info/*",
-    "https://www.cheapshark.com/*"
+    "https://api.isthereanydeal.com/*"
   ],
   "background": {
     "service_worker": "background/background.js",

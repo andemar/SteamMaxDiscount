@@ -1,6 +1,5 @@
 import { decideState } from "../core/discountLogic";
 import { extractRowInfo, findRowElements, findWishlistContainer, } from "../core/steamWishlist";
-import { attachWishlistObserver } from "../core/observer";
 import * as storage from "../core/storage";
 const PROCESSED_ATTR = "data-swd-processed";
 const ICON_CLASS = "swd-discount-circle";
@@ -24,64 +23,61 @@ function pLimit(concurrency) {
     };
 }
 const limited = pLimit(4);
-async function requestSummary(appid) {
+function requestSummary(info, itadId) {
     return new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: "getDiscountSummary", appid }, (resp) => {
-            if (resp && resp.ok) {
-                const r = resp;
-                resolve({ ok: true, summary: r.summary ?? null });
+        chrome.runtime.sendMessage({ type: "getDiscountSummary", appid: info.appid, title: info.title, itadId: itadId ?? undefined }, (resp) => {
+            if (chrome.runtime.lastError) {
+                resolve({ ok: false, error: chrome.runtime.lastError.message ?? "runtime error" });
+                return;
             }
-            else {
-                const r = resp;
-                resolve({ ok: false, error: r?.error ?? "unknown" });
+            if (resp?.ok) {
+                resolve({ ok: true, summary: resp.summary ?? null });
+                return;
             }
+            resolve({ ok: false, error: resp?.error ?? "unknown" });
         });
     });
+}
+async function fetchSummaryForInfo(info) {
+    const appid = info.appid;
+    let summary = await storage.getSummary(appid);
+    if (!summary) {
+        const cachedItadId = await storage.getItadId(appid);
+        const resp = await limited(() => requestSummary(info, cachedItadId));
+        if (resp.ok) {
+            summary = resp.summary;
+            if (summary) {
+                await storage.setSummary(summary);
+                if (summary.itadId)
+                    await storage.setItadId(summary.appid, summary.itadId);
+            }
+        }
+        else {
+            return { summary: null, hadError: true };
+        }
+    }
+    if (!summary) {
+        return { summary: null, hadError: true };
+    }
+    return { summary, hadError: false };
 }
 async function processRow(info) {
     if (info.rowEl.hasAttribute(PROCESSED_ATTR))
         return;
     info.rowEl.setAttribute(PROCESSED_ATTR, "1");
-    const existing = inFlight.get(info.appid);
-    if (existing) {
-        await existing;
-        return;
+    let fetchPromise = inFlight.get(info.appid);
+    if (!fetchPromise) {
+        fetchPromise = fetchSummaryForInfo(info);
+        inFlight.set(info.appid, fetchPromise);
     }
-    const task = (async () => {
-        let summary = await storage.getSummary(info.appid);
-        if (!summary) {
-            const resp = await limited(() => requestSummary(info.appid));
-            if (resp.ok) {
-                summary = resp.summary;
-                if (summary)
-                    await storage.setSummary(summary);
-            }
-            else {
-                renderDecision(info, decideState({
-                    currentDiscountPercent: info.currentDiscountPercent,
-                    summary: null,
-                    hadError: true,
-                }));
-                return;
-            }
-        }
-        if (!summary) {
-            renderDecision(info, decideState({
-                currentDiscountPercent: info.currentDiscountPercent,
-                summary: null,
-                hadError: true,
-            }));
-            return;
-        }
+    try {
+        const result = await fetchPromise;
+        console.log("[swd] rendering appid=", info.appid, "discount=", info.currentDiscountPercent, "result=", result);
         renderDecision(info, decideState({
             currentDiscountPercent: info.currentDiscountPercent,
-            summary,
-            hadError: false,
+            summary: result.summary,
+            hadError: result.hadError,
         }));
-    })();
-    inFlight.set(info.appid, task);
-    try {
-        await task;
     }
     finally {
         inFlight.delete(info.appid);
@@ -89,6 +85,8 @@ async function processRow(info) {
 }
 function renderDecision(info, decision) {
     info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+    info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+    console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
     if (decision.state === "none")
         return;
     const span = document.createElement("span");
@@ -96,12 +94,12 @@ function renderDecision(info, decision) {
     span.setAttribute("data-swd-state", decision.state);
     span.setAttribute("title", decision.tooltip);
     span.textContent = emojiFor(decision.state);
-    span.style.marginLeft = "6px";
-    span.style.display = "inline-block";
-    span.style.fontSize = "0.95em";
-    span.style.verticalAlign = "middle";
-    span.style.cursor = "help";
-    info.titleEl.appendChild(span);
+    if (info.titleEl.parentElement) {
+        info.titleEl.parentElement.insertBefore(span, info.titleEl.nextSibling);
+    }
+    else {
+        info.titleEl.appendChild(span);
+    }
 }
 function emojiFor(state) {
     switch (state) {
@@ -123,7 +121,20 @@ function injectStylesOnce() {
     const s = document.createElement("style");
     s.id = STYLE_ID;
     s.textContent = `
-    .${ICON_CLASS} { line-height: 1; }
+    .${ICON_CLASS} {
+      display: inline-block !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      overflow: visible !important;
+      position: relative !important;
+      z-index: 100 !important;
+      margin-left: 6px;
+      font-size: 1.1em;
+      line-height: 1;
+      vertical-align: middle;
+      cursor: help;
+      flex-shrink: 0;
+    }
     #swd-clear-cache-btn {
       position: fixed; right: 16px; bottom: 16px;
       background: #1b2838; color: #c7d5e0;
@@ -159,59 +170,52 @@ function injectClearCacheButton() {
     });
     document.body.appendChild(btn);
 }
-function scanInitial(container) {
+function isWishlistPage() {
+    const path = window.location.pathname.toLowerCase();
+    return path === "/wishlist" || path.startsWith("/wishlist/");
+}
+function scanAll() {
+    if (!isWishlistPage())
+        return;
+    const container = findWishlistContainer(document) || document.body;
     const rows = findRowElements(container);
-    console.log("[swd] container found, rows:", rows.length, container);
-    let processed = 0;
-    let skipped = 0;
     for (const row of rows) {
-        const info = extractRowInfo(row);
-        if (info) {
-            processed++;
-            console.log("[swd] row appid=", info.appid, "discount=", info.currentDiscountPercent, info.rowEl);
-            void processRow(info);
-        }
-        else {
-            skipped++;
+        const needsProcessing = !row.hasAttribute(PROCESSED_ATTR);
+        const hasIcon = !!row.querySelector(`.${ICON_CLASS}`) || !!row.parentElement?.querySelector(`.${ICON_CLASS}`);
+        if (needsProcessing || !hasIcon) {
+            row.removeAttribute(PROCESSED_ATTR);
+            const info = extractRowInfo(row);
+            if (info)
+                void processRow(info);
         }
     }
-    console.log(`[swd] processed=${processed} skipped=${skipped}`);
 }
 function bootstrap() {
+    if (!isWishlistPage())
+        return;
     injectStylesOnce();
     injectClearCacheButton();
-    const tryInit = () => {
-        const container = findWishlistContainer(document);
-        if (!container || container.hasAttribute("data-swd-bound"))
-            return false;
-        container.setAttribute("data-swd-bound", "1");
-        scanInitial(container);
-        attachWishlistObserver(container, (added) => {
-            for (const node of added) {
-                const nodeMatches = typeof node.matches === "function" &&
-                    node.matches("[href*='/app/']");
-                const hasChild = !!node.querySelector?.("[href*='/app/']");
-                if (nodeMatches || hasChild) {
-                    const parent = (nodeMatches
-                        ? node
-                        : node.querySelector("[data-app-id], div.wishlist_row, div.Row"));
-                    if (parent) {
-                        const info = extractRowInfo(parent);
-                        if (info)
-                            void processRow(info);
-                    }
-                }
-            }
-        });
-        return true;
+    // Initial scans (immediate and delayed to catch post-hydration state)
+    scanAll();
+    setTimeout(scanAll, 500);
+    setTimeout(scanAll, 1500);
+    // Debounced mutation observer to instantly handle React DOM updates & hydration
+    let scanScheduled = false;
+    const debouncedScan = () => {
+        if (!isWishlistPage())
+            return;
+        if (!scanScheduled) {
+            scanScheduled = true;
+            requestAnimationFrame(() => {
+                scanScheduled = false;
+                scanAll();
+            });
+        }
     };
-    if (tryInit())
-        return;
-    const rootObserver = new MutationObserver(() => {
-        if (tryInit())
-            rootObserver.disconnect();
-    });
+    const rootObserver = new MutationObserver(debouncedScan);
     rootObserver.observe(document.body, { childList: true, subtree: true });
+    // Rescan on scroll to handle Steam's virtualized infinite wishlist list
+    window.addEventListener("scroll", debouncedScan, { passive: true });
 }
 if (document.readyState === "complete" || document.readyState === "interactive") {
     bootstrap();

@@ -278,6 +278,7 @@ export function extractRowInfo(rowEl: HTMLElement): WishlistRowInfo | null {
   return {
     rowEl,
     titleEl,
+    title: titleEl.textContent?.trim() ?? "",
     appid,
     currentDiscountPercent,
     href,

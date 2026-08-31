@@ -1,19 +1,38 @@
 /**
  * Centralized selectors. Steam frequently tweaks class names, so we keep
  * these in one place and provide fallbacks.
+ *
+ * Updated August 2026 to support Steam's wishlist redesign which uses
+ * data-ds-appid, search_result_row, and React-rendered containers.
  */
 const SELECTORS = {
     containerCandidates: [
+        /* legacy / classic layout */
         "#wishlist_ctn",
         ".wishlist_ctn",
         "div.wishlist_rows",
         "div[data-feature-target='wishlist']",
         "div._wishlist_rows_",
+        /* 2026 redesign: broader selectors */
+        "#wishlist_items",
+        ".wishlist_items",
+        "[class*='wishlistItems']",
+        "[class*='WishlistItems']",
+        "[class*='wishlist_row']", /* parent of rows */
+        "[id*='wishlist']",
     ],
     rowCandidates: [
+        /* legacy */
         "div.wishlist_row",
         "div.Row",
         "div[data-app-id]",
+        /* 2026 redesign */
+        "div[data-ds-appid]",
+        "a[data-ds-appid]",
+        ".search_result_row",
+        "[class*='wishlistRow']",
+        "[class*='WishlistRow']",
+        "[class*='wishlist_row']",
     ],
     appLinkSelector: "a[href*='/app/']",
     titleCandidates: [
@@ -21,9 +40,13 @@ const SELECTORS = {
         "h2.title",
         "div.title",
         "a.title",
+        ".game_name",
+        "[class*='gameName']",
+        "[class*='GameName']",
+        "[class*='game_name']",
+        "[class*='title']",
         "h2",
         "h3",
-        "[class*='title']",
         "a[href*='/app/']",
     ],
     discountCandidates: [
@@ -31,48 +54,97 @@ const SELECTORS = {
         ".discount-percentage",
         "div.discount_block .discount_pct",
         "span.discount_pct",
+        "[class*='discountPct']",
+        "[class*='DiscountPct']",
+        "[class*='discount_pct']",
         "[class*='discount']",
     ],
 };
-/** Locate the wishlist container; may be null if the user is logged out. */
+/**
+ * Locate the wishlist container. Tries known selectors first, then falls
+ * back to dynamically finding the common ancestor holding distinct games.
+ */
 export function findWishlistContainer(doc) {
     for (const sel of SELECTORS.containerCandidates) {
-        const el = doc.querySelector(sel);
-        if (el instanceof HTMLElement)
-            return el;
+        try {
+            const el = doc.querySelector(sel);
+            if (el instanceof HTMLElement) {
+                console.log("[swd] container matched selector:", sel);
+                return el;
+            }
+        }
+        catch {
+            /* invalid selector – skip */
+        }
     }
-    return null;
+    const appLinks = Array.from(doc.querySelectorAll(SELECTORS.appLinkSelector));
+    if (appLinks.length > 0) {
+        const totalUniqueAppids = new Set();
+        appLinks.forEach((a) => {
+            const id = parseAppid(a.href);
+            if (id)
+                totalUniqueAppids.add(id);
+        });
+        let candidate = appLinks[0].parentElement;
+        let bestContainer = null;
+        let depth = 0;
+        while (candidate && candidate !== doc.body && depth < 15) {
+            const distinctInCandidate = new Set();
+            candidate
+                .querySelectorAll(SELECTORS.appLinkSelector)
+                .forEach((a) => {
+                const id = parseAppid(a.href);
+                if (id)
+                    distinctInCandidate.add(id);
+            });
+            if (distinctInCandidate.size >= Math.min(2, totalUniqueAppids.size) &&
+                distinctInCandidate.size > 0) {
+                bestContainer = candidate;
+            }
+            candidate = candidate.parentElement;
+            depth++;
+        }
+        if (bestContainer) {
+            console.log("[swd] container found holding", totalUniqueAppids.size, "games:", bestContainer.tagName, bestContainer.className);
+            return bestContainer;
+        }
+    }
+    return doc.body;
 }
 /**
- * Find the root element for each wishlist row. Prefers stable class-based
- * selectors; falls back to walking up from each `/app/` anchor to its outer
- * card so we still match Steam's modern SPA where class names are hashed.
+ * Find the root element for each wishlist row.
+ * Groups by distinct appid to ensure every game on the page gets its own card.
  */
 export function findRowElements(container) {
+    const appLinks = Array.from(container.querySelectorAll(SELECTORS.appLinkSelector));
+    const seenAppids = new Set();
     const rows = [];
-    for (const sel of SELECTORS.rowCandidates) {
-        container.querySelectorAll(sel).forEach((el) => {
-            if (el !== container && !rows.includes(el))
-                rows.push(el);
-        });
-    }
-    for (const a of Array.from(container.querySelectorAll(SELECTORS.appLinkSelector))) {
+    for (const a of appLinks) {
+        const appid = parseAppid(a.href);
+        if (!appid || seenAppids.has(appid))
+            continue;
         const card = findOuterCard(a, container);
-        if (card && card !== container && !rows.includes(card))
+        if (card && card !== container) {
+            seenAppids.add(appid);
             rows.push(card);
+        }
     }
     return rows;
 }
-/** Walk up from an app link to the smallest ancestor that still contains
- *  the discount block (or, lacking that, more than just the link itself). */
-function findOuterCard(link, stopAt) {
+/**
+ * Walk up from an app link to find its outer game card in the container.
+ */
+function findOuterCard(link, container) {
     let cur = link.parentElement;
-    let best = null;
+    let best = link.parentElement;
     let depth = 0;
-    while (cur && cur !== stopAt && depth < 8) {
-        if (cur.querySelector(SELECTORS.discountCandidates.join(","))) {
+    while (cur && cur !== container && depth < 10) {
+        if (cur.parentElement === container) {
+            return cur;
+        }
+        if (cur.querySelector(SELECTORS.discountCandidates.join(",")) &&
+            cur.querySelector(SELECTORS.appLinkSelector)) {
             best = cur;
-            break;
         }
         cur = cur.parentElement;
         depth++;
@@ -95,40 +167,76 @@ function parseDiscountText(text) {
 export function extractRowInfo(rowEl) {
     let titleEl = null;
     let href = "";
+    // 1. Try finding title candidate elements with actual non-empty text
     for (const sel of SELECTORS.titleCandidates) {
-        const cand = rowEl.querySelector(sel);
-        if (cand) {
-            titleEl = cand;
-            href =
-                cand instanceof HTMLAnchorElement
-                    ? cand.href
-                    : cand.querySelector("a")?.href ?? "";
-            if (href)
+        try {
+            const candidates = rowEl.querySelectorAll(sel);
+            for (const cand of Array.from(candidates)) {
+                const text = cand.textContent?.trim();
+                // Make sure it's not a discount badge or purely whitespace
+                if (text && text.length > 0 && !text.endsWith("%")) {
+                    titleEl = cand;
+                    href =
+                        cand instanceof HTMLAnchorElement
+                            ? cand.href
+                            : cand.querySelector("a")?.href ?? "";
+                    if (href)
+                        break;
+                }
+            }
+            if (titleEl && href)
                 break;
         }
+        catch {
+            /* invalid selector – skip */
+        }
     }
+    // 2. If no href from title, find any app link in row
     if (!href) {
-        const anchor = rowEl.querySelector(SELECTORS.appLinkSelector);
-        if (anchor)
-            href = anchor.href;
+        const anchors = rowEl.querySelectorAll(SELECTORS.appLinkSelector);
+        for (const a of Array.from(anchors)) {
+            if (a.href) {
+                href = a.href;
+                if (!titleEl && a.textContent?.trim()) {
+                    titleEl = a;
+                }
+                break;
+            }
+        }
+    }
+    // 3. Check data attributes for appid
+    if (!href) {
+        const dsAppid = rowEl.getAttribute("data-ds-appid");
+        if (dsAppid)
+            href = `https://store.steampowered.com/app/${dsAppid}/`;
     }
     if (!href) {
         const dataAttr = rowEl.getAttribute("data-app-id");
         if (dataAttr)
             href = `https://store.steampowered.com/app/${dataAttr}/`;
     }
+    if (!titleEl && href) {
+        const anchor = rowEl.querySelector(SELECTORS.appLinkSelector);
+        titleEl = anchor ?? rowEl;
+    }
     if (!titleEl || !href)
         return null;
     const appid = parseAppid(href);
     if (!appid)
         return null;
+    // 4. Extract current discount percent from anywhere in the card
     let currentDiscountPercent = null;
     for (const sel of SELECTORS.discountCandidates) {
-        const cand = rowEl.querySelector(sel);
-        if (cand?.textContent) {
-            currentDiscountPercent = parseDiscountText(cand.textContent);
-            if (currentDiscountPercent !== null)
-                break;
+        try {
+            const cand = rowEl.querySelector(sel);
+            if (cand?.textContent) {
+                currentDiscountPercent = parseDiscountText(cand.textContent);
+                if (currentDiscountPercent !== null)
+                    break;
+            }
+        }
+        catch {
+            /* invalid selector – skip */
         }
     }
     if (currentDiscountPercent === null) {
@@ -137,6 +245,7 @@ export function extractRowInfo(rowEl) {
     return {
         rowEl,
         titleEl,
+        title: titleEl.textContent?.trim() ?? "",
         appid,
         currentDiscountPercent,
         href,

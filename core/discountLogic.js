@@ -1,43 +1,64 @@
-/**
- * Pure: maps (current discount, history summary, error flag) -> icon state.
- *  - none  : no current discount -> skip
- *  - green : current == max AND it has happened only once before
- *  - yellow: current == max AND it has happened multiple times
- *  - red   : current > 0 but < max
- *  - orange: error or no history available
- */
 export function decideState(input) {
     const { currentDiscountPercent, summary, hadError } = input;
-    if (hadError || !summary) {
-        return {
-            state: "orange",
-            tooltip: "Could not retrieve discount history from SteamDB. " +
-                "Click 'Clear discount cache' and reload to retry.",
-        };
-    }
     if (currentDiscountPercent === null || currentDiscountPercent <= 0) {
         return { state: "none", tooltip: "" };
     }
-    if (currentDiscountPercent === summary.allTimeMaxPercent) {
-        if (summary.timesAtMax <= 1) {
+    if (hadError || !summary) {
+        return {
+            state: "orange",
+            tooltip: "ITAD API error: could not retrieve historical prices.",
+        };
+    }
+    if (summary.lowestCut === null) {
+        return {
+            state: "orange",
+            tooltip: "ITAD API returned incomplete historical low data.",
+        };
+    }
+    const currentCut = summary.currentCut !== null && summary.currentCut > 0
+        ? summary.currentCut
+        : currentDiscountPercent;
+    const allTimeMaxPercent = summary.lowestCut;
+    if (currentCut > allTimeMaxPercent) {
+        return {
+            state: "green",
+            tooltip: `New all-time maximum discount (${currentCut}%), beats recorded max of ${allTimeMaxPercent}%.`,
+        };
+    }
+    if (currentCut === allTimeMaxPercent) {
+        const currentTs = summary.currentTimestamp ? Date.parse(summary.currentTimestamp) : NaN;
+        const lowestTs = summary.lowestTimestamp ? Date.parse(summary.lowestTimestamp) : NaN;
+        if (Number.isFinite(currentTs) && Number.isFinite(lowestTs)) {
+            if (Math.abs(currentTs - lowestTs) <= 60000) {
+                return {
+                    state: "green",
+                    tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%) and appears to be the first occurrence.`,
+                };
+            }
+            if (lowestTs < currentTs) {
+                return {
+                    state: "yellow",
+                    tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%), but this max was seen before.`,
+                };
+            }
             return {
                 state: "green",
-                tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), first time at this level.`,
+                tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%).`,
             };
         }
         return {
             state: "yellow",
-            tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), seen ${summary.timesAtMax} times historically.`,
+            tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%), timestamp comparison unavailable.`,
         };
     }
-    if (currentDiscountPercent < summary.allTimeMaxPercent) {
+    if (currentCut < allTimeMaxPercent) {
         return {
             state: "red",
-            tooltip: `Current ${currentDiscountPercent}% is below the all-time max of ${summary.allTimeMaxPercent}%.`,
+            tooltip: `Current ${currentCut}% is below the all-time max of ${allTimeMaxPercent}%.`,
         };
     }
     return {
-        state: "red",
-        tooltip: `Current ${currentDiscountPercent}% is at or above the recorded max of ${summary.allTimeMaxPercent}%.`,
+        state: "orange",
+        tooltip: "ITAD API data could not be interpreted.",
     };
 }

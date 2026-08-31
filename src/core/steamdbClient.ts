@@ -167,11 +167,24 @@ function summarize(discounts: number[], appid: number): DiscountSummary | null {
   if (discounts.length === 0) return null;
   const max = discounts.reduce((a, b) => (b > a ? b : a), 0);
   if (max <= 0) return null;
-  const timesAtMax = discounts.filter((d) => d === max).length;
   return {
     appid,
-    allTimeMaxPercent: max,
-    timesAtMax,
+    itadId: `deprecated-steamdb-${appid}`,
+    currentCut: max,
+    currentTimestamp: null,
+    lowestCut: max,
+    lowestTimestamp: null,
+    overview: {
+      id: `deprecated-steamdb-${appid}`,
+      currentPrice: null,
+      currentRegular: null,
+      currentCut: max,
+      currentTimestamp: null,
+      lowestPrice: null,
+      lowestRegular: null,
+      lowestCut: max,
+      lowestTimestamp: null,
+    },
     lastUpdatedAt: Date.now(),
   };
 }

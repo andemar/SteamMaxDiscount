@@ -4,7 +4,6 @@ import {
   findRowElements,
   findWishlistContainer,
 } from "../core/steamWishlist";
-import { attachWishlistObserver } from "../core/observer";
 import * as storage from "../core/storage";
 import type {
   DiscountState,
@@ -27,13 +26,57 @@ interface FetchSummaryResult {
 
 const inFlight = new Map<number, Promise<FetchSummaryResult>>();
 
-async function fetchSummaryForAppid(appid: number): Promise<FetchSummaryResult> {
+function pLimit(concurrency: number) {
+  const queue: Array<() => void> = [];
+  let active = 0;
+
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= concurrency) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      queue.shift()?.();
+    }
+  };
+}
+
+const limited = pLimit(4);
+
+function requestSummary(info: WishlistRowInfo, itadId?: string | null): Promise<SummaryResp> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: "getDiscountSummary", appid: info.appid, title: info.title, itadId: itadId ?? undefined },
+      (resp: SummaryResp | undefined) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message ?? "runtime error" });
+          return;
+        }
+        if (resp?.ok) {
+          resolve({ ok: true, summary: resp.summary ?? null });
+          return;
+        }
+        resolve({ ok: false, error: resp?.error ?? "unknown" });
+      }
+    );
+  });
+}
+
+async function fetchSummaryForInfo(info: WishlistRowInfo): Promise<FetchSummaryResult> {
+  const appid = info.appid;
   let summary = await storage.getSummary(appid);
   if (!summary) {
-    const resp = await limited(() => requestSummary(appid));
+    const cachedItadId = await storage.getItadId(appid);
+    const resp = await limited(() => requestSummary(info, cachedItadId));
     if (resp.ok) {
       summary = resp.summary;
-      if (summary) await storage.setSummary(summary);
+      if (summary) {
+        await storage.setSummary(summary);
+        if (summary.itadId) await storage.setItadId(summary.appid, summary.itadId);
+      }
     } else {
       return { summary: null, hadError: true };
     }
@@ -50,7 +93,7 @@ async function processRow(info: WishlistRowInfo): Promise<void> {
 
   let fetchPromise = inFlight.get(info.appid);
   if (!fetchPromise) {
-    fetchPromise = fetchSummaryForAppid(info.appid);
+    fetchPromise = fetchSummaryForInfo(info);
     inFlight.set(info.appid, fetchPromise);
   }
 

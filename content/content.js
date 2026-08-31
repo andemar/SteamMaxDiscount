@@ -9,58 +9,85 @@
     if (hadError || !summary) {
       return {
         state: "orange",
-        tooltip: "Could not retrieve historical discount records. Click 'Clear discount cache' and reload to retry."
+        tooltip: "ITAD API error: could not retrieve historical prices."
       };
     }
-    if (currentDiscountPercent === summary.allTimeMaxPercent && summary.timesAtMax <= 1) {
+    if (summary.lowestCut === null) {
+      return {
+        state: "orange",
+        tooltip: "ITAD API returned incomplete historical low data."
+      };
+    }
+    const currentCut = summary.currentCut !== null && summary.currentCut > 0 ? summary.currentCut : currentDiscountPercent;
+    const allTimeMaxPercent = summary.lowestCut;
+    if (currentCut > allTimeMaxPercent) {
       return {
         state: "green",
-        tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), first time at this level.`
+        tooltip: `New all-time maximum discount (${currentCut}%), beats recorded max of ${allTimeMaxPercent}%.`
       };
     }
-    if (currentDiscountPercent === summary.allTimeMaxPercent && summary.timesAtMax > 1) {
+    if (currentCut === allTimeMaxPercent) {
+      const currentTs = summary.currentTimestamp ? Date.parse(summary.currentTimestamp) : NaN;
+      const lowestTs = summary.lowestTimestamp ? Date.parse(summary.lowestTimestamp) : NaN;
+      if (Number.isFinite(currentTs) && Number.isFinite(lowestTs)) {
+        if (Math.abs(currentTs - lowestTs) <= 6e4) {
+          return {
+            state: "green",
+            tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%) and appears to be the first occurrence.`
+          };
+        }
+        if (lowestTs < currentTs) {
+          return {
+            state: "yellow",
+            tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%), but this max was seen before.`
+          };
+        }
+        return {
+          state: "green",
+          tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%).`
+        };
+      }
       return {
         state: "yellow",
-        tooltip: `All-time maximum discount (${summary.allTimeMaxPercent}%), seen ${summary.timesAtMax} times historically.`
+        tooltip: `Current discount matches all-time max (${allTimeMaxPercent}%), timestamp comparison unavailable.`
       };
     }
-    if (currentDiscountPercent > summary.allTimeMaxPercent) {
-      return {
-        state: "green",
-        tooltip: `New all-time maximum discount (${currentDiscountPercent}%), beats recorded max of ${summary.allTimeMaxPercent}%.`
-      };
-    }
-    if (currentDiscountPercent < summary.allTimeMaxPercent) {
+    if (currentCut < allTimeMaxPercent) {
       return {
         state: "red",
-        tooltip: `Current ${currentDiscountPercent}% is below the all-time max of ${summary.allTimeMaxPercent}%.`
+        tooltip: `Current ${currentCut}% is below the all-time max of ${allTimeMaxPercent}%.`
       };
     }
     return {
-      state: "none",
-      tooltip: ""
+      state: "orange",
+      tooltip: "ITAD API data could not be interpreted."
     };
   }
 
   // src/core/steamWishlist.ts
   var SELECTORS = {
     containerCandidates: [
+      /* legacy / classic layout */
       "#wishlist_ctn",
       ".wishlist_ctn",
       "div.wishlist_rows",
       "div[data-feature-target='wishlist']",
       "div._wishlist_rows_",
+      /* 2026 redesign: broader selectors */
       "#wishlist_items",
       ".wishlist_items",
       "[class*='wishlistItems']",
       "[class*='WishlistItems']",
       "[class*='wishlist_row']",
+      /* parent of rows */
       "[id*='wishlist']"
     ],
     rowCandidates: [
+      /* legacy */
       "div.wishlist_row",
       "div.Row",
       "div[data-app-id]",
+      /* 2026 redesign */
       "div[data-ds-appid]",
       "a[data-ds-appid]",
       ".search_result_row",
@@ -105,9 +132,11 @@
       } catch {
       }
     }
-    const appLinks = Array.from(doc.querySelectorAll(SELECTORS.appLinkSelector));
+    const appLinks = Array.from(
+      doc.querySelectorAll(SELECTORS.appLinkSelector)
+    );
     if (appLinks.length > 0) {
-      const totalUniqueAppids = new Set();
+      const totalUniqueAppids = /* @__PURE__ */ new Set();
       appLinks.forEach((a) => {
         const id = parseAppid(a.href);
         if (id) totalUniqueAppids.add(id);
@@ -116,7 +145,7 @@
       let bestContainer = null;
       let depth = 0;
       while (candidate && candidate !== doc.body && depth < 15) {
-        const distinctInCandidate = new Set();
+        const distinctInCandidate = /* @__PURE__ */ new Set();
         candidate.querySelectorAll(SELECTORS.appLinkSelector).forEach((a) => {
           const id = parseAppid(a.href);
           if (id) distinctInCandidate.add(id);
@@ -128,7 +157,13 @@
         depth++;
       }
       if (bestContainer) {
-        console.log("[swd] container found holding", totalUniqueAppids.size, "games:", bestContainer.tagName, bestContainer.className);
+        console.log(
+          "[swd] container found holding",
+          totalUniqueAppids.size,
+          "games:",
+          bestContainer.tagName,
+          bestContainer.className
+        );
         return bestContainer;
       }
     }
@@ -138,7 +173,7 @@
     const appLinks = Array.from(
       container.querySelectorAll(SELECTORS.appLinkSelector)
     );
-    const seenAppids = new Set();
+    const seenAppids = /* @__PURE__ */ new Set();
     const rows = [];
     for (const a of appLinks) {
       const appid = parseAppid(a.href);
@@ -197,7 +232,9 @@
       }
     }
     if (!href) {
-      const anchors = rowEl.querySelectorAll(SELECTORS.appLinkSelector);
+      const anchors = rowEl.querySelectorAll(
+        SELECTORS.appLinkSelector
+      );
       for (const a of Array.from(anchors)) {
         if (a.href) {
           href = a.href;
@@ -217,7 +254,9 @@
       if (dataAttr) href = `https://store.steampowered.com/app/${dataAttr}/`;
     }
     if (!titleEl && href) {
-      const anchor = rowEl.querySelector(SELECTORS.appLinkSelector);
+      const anchor = rowEl.querySelector(
+        SELECTORS.appLinkSelector
+      );
       titleEl = anchor ?? rowEl;
     }
     if (!titleEl || !href) return null;
@@ -240,53 +279,44 @@
     return {
       rowEl,
       titleEl,
+      title: titleEl.textContent?.trim() ?? "",
       appid,
       currentDiscountPercent,
       href
     };
   }
 
-  // src/core/observer.ts
-  function attachWishlistObserver(container, onAdded) {
-    let pending = [];
-    let scheduled = false;
-    const flush = () => {
-      scheduled = false;
-      const batch = pending;
-      pending = [];
-      if (batch.length > 0) onAdded(batch);
-    };
-    const observer = new MutationObserver((records) => {
-      for (const r of records) {
-        r.addedNodes.forEach((n) => {
-          if (n instanceof HTMLElement) pending.push(n);
-        });
-      }
-      if (!scheduled && pending.length > 0) {
-        scheduled = true;
-        requestAnimationFrame(flush);
-      }
-    });
-    observer.observe(container, { childList: true, subtree: true });
-    return observer;
-  }
-
   // src/core/storage.ts
-  var KEY_PREFIX = "discountMeta_";
-  function keyFor(appid) {
-    return `${KEY_PREFIX}${appid}`;
+  var SUMMARY_KEY_PREFIX = "discountMeta_";
+  var ITAD_MAP_KEY_PREFIX = "itadMap_";
+  function summaryKeyFor(appid) {
+    return `${SUMMARY_KEY_PREFIX}${appid}`;
+  }
+  function itadMapKeyFor(appid) {
+    return `${ITAD_MAP_KEY_PREFIX}${appid}`;
   }
   async function getSummary(appid) {
-    const k = keyFor(appid);
+    const k = summaryKeyFor(appid);
     const obj = await chrome.storage.local.get(k);
     return obj[k] ?? null;
   }
   async function setSummary(summary) {
-    await chrome.storage.local.set({ [keyFor(summary.appid)]: summary });
+    await chrome.storage.local.set({ [summaryKeyFor(summary.appid)]: summary });
+  }
+  async function getItadId(appid) {
+    const k = itadMapKeyFor(appid);
+    const obj = await chrome.storage.local.get(k);
+    const v = obj[k];
+    return typeof v === "string" && v.length > 0 ? v : null;
+  }
+  async function setItadId(appid, itadId) {
+    await chrome.storage.local.set({ [itadMapKeyFor(appid)]: itadId });
   }
   async function clearAllSummaries() {
     const all = await chrome.storage.local.get(null);
-    const keys = Object.keys(all).filter((k) => k.startsWith(KEY_PREFIX));
+    const keys = Object.keys(all).filter(
+      (k) => k.startsWith(SUMMARY_KEY_PREFIX) || k.startsWith(ITAD_MAP_KEY_PREFIX)
+    );
     if (keys.length === 0) return 0;
     await chrome.storage.local.remove(keys);
     return keys.length;
@@ -314,29 +344,36 @@
     };
   }
   var limited = pLimit(4);
-  async function requestSummary(appid) {
+  function requestSummary(info, itadId) {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
-        { type: "getDiscountSummary", appid },
+        { type: "getDiscountSummary", appid: info.appid, title: info.title, itadId: itadId ?? void 0 },
         (resp) => {
-          if (resp && resp.ok) {
-            const r = resp;
-            resolve({ ok: true, summary: r.summary ?? null });
-          } else {
-            const r = resp;
-            resolve({ ok: false, error: r?.error ?? "unknown" });
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message ?? "runtime error" });
+            return;
           }
+          if (resp?.ok) {
+            resolve({ ok: true, summary: resp.summary ?? null });
+            return;
+          }
+          resolve({ ok: false, error: resp?.error ?? "unknown" });
         }
       );
     });
   }
-  async function fetchSummaryForAppid(appid) {
+  async function fetchSummaryForInfo(info) {
+    const appid = info.appid;
     let summary = await getSummary(appid);
     if (!summary) {
-      const resp = await limited(() => requestSummary(appid));
+      const cachedItadId = await getItadId(appid);
+      const resp = await limited(() => requestSummary(info, cachedItadId));
       if (resp.ok) {
         summary = resp.summary;
-        if (summary) await setSummary(summary);
+        if (summary) {
+          await setSummary(summary);
+          if (summary.itadId) await setItadId(summary.appid, summary.itadId);
+        }
       } else {
         return { summary: null, hadError: true };
       }
@@ -351,11 +388,19 @@
     info.rowEl.setAttribute(PROCESSED_ATTR, "1");
     let fetchPromise = inFlight.get(info.appid);
     if (!fetchPromise) {
-      fetchPromise = fetchSummaryForAppid(info.appid);
+      fetchPromise = fetchSummaryForInfo(info);
       inFlight.set(info.appid, fetchPromise);
     }
     try {
       const result = await fetchPromise;
+      console.log(
+        "[swd] rendering appid=",
+        info.appid,
+        "discount=",
+        info.currentDiscountPercent,
+        "result=",
+        result
+      );
       renderDecision(
         info,
         decideState({
@@ -371,6 +416,7 @@
   function renderDecision(info, decision) {
     info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
     info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
+    console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
     if (decision.state === "none") return;
     const span = document.createElement("span");
     span.className = ICON_CLASS;
@@ -437,11 +483,13 @@
       const n = await clearAllSummaries();
       btn.textContent = n > 0 ? `Cleared ${n} entries \u2014 reload to refresh` : "Nothing to clear";
       setTimeout(() => btn.textContent = "Clear discount cache", 4e3);
-      const container = findWishlistContainer(document) || document.body;
-      for (const row of findRowElements(container)) {
-        row.removeAttribute(PROCESSED_ATTR);
-        const info = extractRowInfo(row);
-        if (info) void processRow(info);
+      const container = findWishlistContainer(document);
+      if (container) {
+        for (const row of findRowElements(container)) {
+          row.removeAttribute(PROCESSED_ATTR);
+          const info = extractRowInfo(row);
+          if (info) void processRow(info);
+        }
       }
     });
     document.body.appendChild(btn);
