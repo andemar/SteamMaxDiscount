@@ -11,3 +11,15 @@ await esbuild.build({
 });
 
 console.log("[bundle] content/content.js");
+
+await esbuild.build({
+  entryPoints: ["src/background/background.ts"],
+  outfile: "background/background.js",
+  bundle: true,
+  format: "iife",
+  target: "chrome114",
+  sourcemap: true,
+  logLevel: "info",
+});
+
+console.log("[bundle] background/background.js");

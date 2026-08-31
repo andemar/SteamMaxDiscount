@@ -77,12 +77,29 @@ function pickBestMatch(title, candidates) {
         return contained;
     return candidates[0];
 }
+/**
+ * Resolve a Steam appid (and optional title) to an ITAD game UUID.
+ *
+ * 1. Primary: GET /games/lookup/v1?appid=<appid>  (exact Steam appid lookup)
+ * 2. Fallback: GET /games/search/v1?title=<title>  (fuzzy title search)
+ */
 export async function resolveItadId(input) {
-    const byAppidUrl = `${ITAD_API_BASE}/games/search/v1?appid=${encodeURIComponent(String(input.appid))}`;
-    const byAppidRaw = await itadFetch(byAppidUrl, { method: "GET" });
-    const byAppid = parseSearchResults(byAppidRaw);
-    if (byAppid.length > 0)
-        return byAppid[0].id;
+    // 1. Try exact lookup by Steam appid
+    try {
+        const lookupUrl = `${ITAD_API_BASE}/games/lookup/v1?appid=${encodeURIComponent(String(input.appid))}`;
+        const lookupRaw = await itadFetch(lookupUrl, { method: "GET" });
+        const rec = asRecord(lookupRaw);
+        if (rec?.found === true) {
+            const game = asRecord(rec.game);
+            if (game && typeof game.id === "string") {
+                return game.id;
+            }
+        }
+    }
+    catch {
+        // lookup failed — fall through to title search
+    }
+    // 2. Fallback: search by title
     const byTitleUrl = `${ITAD_API_BASE}/games/search/v1?title=${encodeURIComponent(input.title)}`;
     const byTitleRaw = await itadFetch(byTitleUrl, { method: "GET" });
     const byTitle = parseSearchResults(byTitleRaw);
