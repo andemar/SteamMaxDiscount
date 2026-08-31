@@ -323,10 +323,11 @@
   }
 
   // src/content/content.ts
-  var PROCESSED_ATTR = "data-swd-processed";
-  var ICON_CLASS = "swd-discount-circle";
   var STYLE_ID = "swd-styles";
-  var inFlight = /* @__PURE__ */ new Map();
+  var SWD_STATE_ATTR = "data-swd-state";
+  var SWD_TOOLTIP_ATTR = "data-swd-tooltip";
+  var decisionCache = /* @__PURE__ */ new Map();
+  var fetchCache = /* @__PURE__ */ new Map();
   function pLimit(concurrency) {
     const queue = [];
     let active = 0;
@@ -344,10 +345,10 @@
     };
   }
   var limited = pLimit(4);
-  function requestSummary(info, itadId) {
+  function requestSummary(appid, title, itadId) {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
-        { type: "getDiscountSummary", appid: info.appid, title: info.title, itadId: itadId ?? void 0 },
+        { type: "getDiscountSummary", appid, title, itadId: itadId ?? void 0 },
         (resp) => {
           if (chrome.runtime.lastError) {
             resolve({ ok: false, error: chrome.runtime.lastError.message ?? "runtime error" });
@@ -362,12 +363,11 @@
       );
     });
   }
-  async function fetchSummaryForInfo(info) {
-    const appid = info.appid;
+  async function fetchSummaryForAppid(appid, title) {
     let summary = await getSummary(appid);
     if (!summary) {
       const cachedItadId = await getItadId(appid);
-      const resp = await limited(() => requestSummary(info, cachedItadId));
+      const resp = await limited(() => requestSummary(appid, title, cachedItadId));
       if (resp.ok) {
         summary = resp.summary;
         if (summary) {
@@ -378,67 +378,62 @@
         return { summary: null, hadError: true };
       }
     }
-    if (!summary) {
-      return { summary: null, hadError: true };
-    }
-    return { summary, hadError: false };
+    return { summary: summary ?? null, hadError: !summary };
   }
-  async function processRow(info) {
-    if (info.rowEl.hasAttribute(PROCESSED_ATTR)) return;
-    info.rowEl.setAttribute(PROCESSED_ATTR, "1");
-    let fetchPromise = inFlight.get(info.appid);
-    if (!fetchPromise) {
-      fetchPromise = fetchSummaryForInfo(info);
-      inFlight.set(info.appid, fetchPromise);
+  function getOrFetch(appid, title) {
+    let p = fetchCache.get(appid);
+    if (!p) {
+      p = fetchSummaryForAppid(appid, title);
+      fetchCache.set(appid, p);
     }
-    try {
-      const result = await fetchPromise;
-      console.log(
-        "[swd] rendering appid=",
-        info.appid,
-        "discount=",
-        info.currentDiscountPercent,
-        "result=",
-        result
-      );
-      renderDecision(
-        info,
-        decideState({
-          currentDiscountPercent: info.currentDiscountPercent,
-          summary: result.summary,
-          hadError: result.hadError
-        })
-      );
-    } finally {
-      inFlight.delete(info.appid);
-    }
+    return p;
   }
-  function renderDecision(info, decision) {
-    info.titleEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
-    info.rowEl.querySelectorAll(`.${ICON_CLASS}`).forEach((n) => n.remove());
-    console.log("[swd] renderDecision state=", decision.state, "for", info.titleEl);
-    if (decision.state === "none") return;
-    const span = document.createElement("span");
-    span.className = ICON_CLASS;
-    span.setAttribute("data-swd-state", decision.state);
-    span.setAttribute("title", decision.tooltip);
-    span.textContent = emojiFor(decision.state);
-    if (info.titleEl.parentElement) {
-      info.titleEl.parentElement.insertBefore(span, info.titleEl.nextSibling);
-    } else {
-      info.titleEl.appendChild(span);
+  function stampDecision(info, decision) {
+    const target = info.rowEl;
+    if (decision.state === "none") {
+      if (target.hasAttribute(SWD_STATE_ATTR)) {
+        target.removeAttribute(SWD_STATE_ATTR);
+        target.removeAttribute(SWD_TOOLTIP_ATTR);
+      }
+      return;
     }
+    if (target.getAttribute(SWD_STATE_ATTR) === decision.state) {
+      return;
+    }
+    target.setAttribute(SWD_STATE_ATTR, decision.state);
+    target.setAttribute(SWD_TOOLTIP_ATTR, decision.tooltip);
+  }
+  function processRow(info) {
+    const { appid, title } = info;
+    const cached = decisionCache.get(appid);
+    if (cached) {
+      stampDecision(info, cached);
+      return;
+    }
+    void getOrFetch(appid, title).then((result) => {
+      const decision = decideState({
+        currentDiscountPercent: info.currentDiscountPercent,
+        summary: result.summary,
+        hadError: result.hadError
+      });
+      decisionCache.set(appid, decision);
+      stampDecision(info, decision);
+    });
   }
   function emojiFor(state) {
     switch (state) {
       case "green":
-        return "\u{1F7E2}";
+        return "\\1F7E2";
+      // CSS content escape for 🟢
       case "yellow":
-        return "\u{1F7E1}";
+        return "\\1F7E1";
+      // 🟡
       case "red":
-        return "\u{1F534}";
+        return "\\1F534";
+      // 🔴
       case "orange":
-        return "\u{1F7E0}";
+        return "\\1F7E0";
+      // 🟠
       case "none":
         return "";
     }
@@ -447,21 +442,30 @@
     if (document.getElementById(STYLE_ID)) return;
     const s = document.createElement("style");
     s.id = STYLE_ID;
-    s.textContent = `
-    .${ICON_CLASS} {
-      display: inline-block !important;
-      visibility: visible !important;
-      opacity: 1 !important;
-      overflow: visible !important;
-      position: relative !important;
-      z-index: 100 !important;
-      margin-left: 6px;
-      font-size: 1.1em;
+    const states = ["green", "yellow", "red", "orange"];
+    const afterRules = states.map(
+      (state) => `
+    [${SWD_STATE_ATTR}="${state}"]::before {
+      content: "${emojiFor(state)}";
+      position: absolute;
+      top: 8px;
+      right: 220px;
+      font-size: 1.2em;
       line-height: 1;
-      vertical-align: middle;
       cursor: help;
-      flex-shrink: 0;
+      z-index: 100;
+      pointer-events: auto;
+    }`
+    ).join("\n");
+    const positionRule = `
+    [${SWD_STATE_ATTR}] {
+      position: relative !important;
     }
+  `;
+    s.textContent = `
+    ${positionRule}
+    ${afterRules}
+
     #swd-clear-cache-btn {
       position: fixed; right: 16px; bottom: 16px;
       background: #1b2838; color: #c7d5e0;
@@ -480,17 +484,12 @@
     btn.id = "swd-clear-cache-btn";
     btn.textContent = "Clear discount cache";
     btn.addEventListener("click", async () => {
+      decisionCache.clear();
+      fetchCache.clear();
       const n = await clearAllSummaries();
       btn.textContent = n > 0 ? `Cleared ${n} entries \u2014 reload to refresh` : "Nothing to clear";
       setTimeout(() => btn.textContent = "Clear discount cache", 4e3);
-      const container = findWishlistContainer(document);
-      if (container) {
-        for (const row of findRowElements(container)) {
-          row.removeAttribute(PROCESSED_ATTR);
-          const info = extractRowInfo(row);
-          if (info) void processRow(info);
-        }
-      }
+      scanAll();
     });
     document.body.appendChild(btn);
   }
@@ -498,18 +497,25 @@
     const path = window.location.pathname.toLowerCase();
     return path === "/wishlist" || path.startsWith("/wishlist/");
   }
+  function stampIcons() {
+    if (!isWishlistPage()) return;
+    const container = findWishlistContainer(document) || document.body;
+    const rows = findRowElements(container);
+    for (const row of rows) {
+      const info = extractRowInfo(row);
+      if (!info) continue;
+      const cached = decisionCache.get(info.appid);
+      if (cached) stampDecision(info, cached);
+    }
+  }
   function scanAll() {
     if (!isWishlistPage()) return;
     const container = findWishlistContainer(document) || document.body;
     const rows = findRowElements(container);
     for (const row of rows) {
-      const needsProcessing = !row.hasAttribute(PROCESSED_ATTR);
-      const hasIcon = !!row.querySelector(`.${ICON_CLASS}`) || !!row.parentElement?.querySelector(`.${ICON_CLASS}`);
-      if (needsProcessing || !hasIcon) {
-        row.removeAttribute(PROCESSED_ATTR);
-        const info = extractRowInfo(row);
-        if (info) void processRow(info);
-      }
+      const info = extractRowInfo(row);
+      if (!info) continue;
+      processRow(info);
     }
   }
   function bootstrap() {
@@ -519,20 +525,16 @@
     scanAll();
     setTimeout(scanAll, 500);
     setTimeout(scanAll, 1500);
-    let scanScheduled = false;
-    const debouncedScan = () => {
-      if (!isWishlistPage()) return;
-      if (!scanScheduled) {
-        scanScheduled = true;
-        requestAnimationFrame(() => {
-          scanScheduled = false;
-          scanAll();
-        });
-      }
-    };
-    const rootObserver = new MutationObserver(debouncedScan);
-    rootObserver.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("scroll", debouncedScan, { passive: true });
+    let scrollTick = 0;
+    window.addEventListener("scroll", () => {
+      if (scrollTick) return;
+      scrollTick = requestAnimationFrame(() => {
+        scrollTick = 0;
+        stampIcons();
+      });
+    }, { passive: true });
+    setInterval(stampIcons, 300);
+    setInterval(scanAll, 3e3);
   }
   if (document.readyState === "complete" || document.readyState === "interactive") {
     bootstrap();
